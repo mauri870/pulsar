@@ -104,46 +104,51 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // map phase
         let all_pairs: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
-            lines.par_iter().flat_map(|line| {
-                let vm = vm::VM::new().expect("Failed to create VM");
-                let mut intermediate_pairs = Vec::new();
+            const CHUNK_SIZE: usize = 1024;
+            lines.chunks(CHUNK_SIZE)
+                .collect::<Vec<_>>()
+                .par_iter()
+                .flat_map(|chunk| {
+                    let vm = vm::VM::new().expect("Failed to create VM");
+                    let mut all_intermediate_pairs = Vec::new();
 
-                vm.eval(|ctx| {
-                    let _: () = ctx.eval(code.as_str()).expect("Failed to evaluate js script");
-                    let globals = ctx.globals();
+                    vm.eval(|ctx| {
+                        // Evaluate script once per VM (for the entire chunk)
+                        let _: () = ctx.eval(code.as_str()).expect("Failed to evaluate js script");
+                        let globals = ctx.globals();
 
-                    // get the map function, support both function declaration and const assignment
-                    let map_fn: rquickjs::Function = globals.get("map")
-                        .or_else(|_| {
-                            // try with const map
-                            ctx.eval("map")
-                        })
-                        .expect("map function not found in script. Make sure to define either 'function map() {}' or 'const map = () => {}'");
+                        // get the map function, support both function declaration and const assignment
+                        let map_fn: rquickjs::Function = globals.get("map")
+                            .or_else(|_| ctx.eval("map"))
+                            .expect("map function not found in script. Make sure to define either 'function map() {}' or 'const map = () => {}'");
 
-                    // Process this single line through the map function
-                    let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),)).unwrap();
+                        // Process all lines in this chunk
+                        for line in chunk.iter() {
+                            let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),)).unwrap();
 
-                    // Convert JavaScript array result to Rust vector
-                    if let Some(array) = result.as_array() {
-                        for i in 0..array.len() {
-                            if let Ok(pair) = array.get::<rquickjs::Value>(i) {
-                                if let Some(pair_array) = pair.as_array() {
-                                    if pair_array.len() >= 2 {
-                                        let key: String = pair_array.get(0).unwrap();
-                                        let value: rquickjs::Value = pair_array.get(1).unwrap();
-                                        // Convert rquickjs::Value to serde_json::Value for storage
-                                        let json_str = ctx.json_stringify(value).unwrap().unwrap().to_string().unwrap();
-                                        let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-                                        intermediate_pairs.push((key, json_value));
+                            // Convert JavaScript array result to Rust vector
+                            if let Some(array) = result.as_array() {
+                                for i in 0..array.len() {
+                                    if let Ok(pair) = array.get::<rquickjs::Value>(i) {
+                                        if let Some(pair_array) = pair.as_array() {
+                                            if pair_array.len() >= 2 {
+                                                let key: String = pair_array.get(0).unwrap();
+                                                let value: rquickjs::Value = pair_array.get(1).unwrap();
+                                                // Convert rquickjs::Value to serde_json::Value for storage
+                                                let json_str = ctx.json_stringify(value).unwrap().unwrap().to_string().unwrap();
+                                                let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                                                all_intermediate_pairs.push((key, json_value));
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                });
+                    });
 
-                intermediate_pairs
-            }).collect()
+                    all_intermediate_pairs
+                })
+                .collect()
         }).await?;
 
         // group phase
