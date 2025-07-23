@@ -40,7 +40,7 @@ user	0m26.396s
 sys	    0m0.203s
 ```
 
-You could extend it to ignore stop words:
+You could extend it to ignore stop words as well as sorting the results (disable output streaming):
 
 ```bash
 cat > script.js << 'EOF'
@@ -59,6 +59,9 @@ const map = line => line
   .map(word => [word, 1]);
 
 const reduce = (key, values) => values.length;
+
+const sort = results =>
+  results.sort((a, b) => a[0].localeCompare(b[0])); // Sort alphabetically
 EOF
 
 ./target/release/pulsar -f input.txt -s script.js

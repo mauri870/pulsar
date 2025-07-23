@@ -115,6 +115,34 @@ EOF
   rm -rf "$TMPDIR"
 }
 
+@test "sorting" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = (line) => [[line, 0]];
+const reduce = (key, values) => values[0];
+const sort = results => results.sort((a, b) => b[0].localeCompare(a[0]))
+EOF
+
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ $(echo "$output" | wc -l) -eq 4 ]]
+  [[ "$output" == "3: 0
+2: 0
+1: 0
+0: 0" ]]
+
+  rm -rf "$TMPDIR"
+}
+
 @test "map reduce returning strings" {
   TMPDIR=$(mktemp -d)
   TESTFILE="$TMPDIR/test.txt"
@@ -149,7 +177,7 @@ EOF
   rm -rf "$TMPDIR"
 }
 
-@test "custom script with syntax error" {
+@test "errors out on js syntax error" {
   TMPDIR=$(mktemp -d)
   TESTFILE="$TMPDIR/test.txt"
   SCRIPTFILE="$TMPDIR/script.js"

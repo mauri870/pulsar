@@ -11,7 +11,7 @@ const map = line => line
 
 // Reduce function:
 // Receives a key and all values associated with that key.
-// Should return a single aggregated value for the key.
+// Should return a aggregated value for the key.
 const reduce = (key, values) => values.length; // count occurrences of each word
 
 // Sort function:
