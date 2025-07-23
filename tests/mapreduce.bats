@@ -16,6 +16,7 @@ setup() {
   [ "$status" -eq 0 ]
   
   # Check that we get word counts for each word
+  [[ "$(echo "$output" | wc -l)" -eq 8 ]]
   [[ "$output" =~ "the: 2" ]]
   [[ "$output" =~ "quick: 1" ]]
   [[ "$output" =~ "brown: 1" ]]

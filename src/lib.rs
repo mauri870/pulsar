@@ -7,6 +7,7 @@ use std::fmt::Debug;
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
+use rayon::prelude::*;
 
 #[derive(Debug, Error)]
 pub enum MapReduceError {
@@ -66,25 +67,19 @@ function reduce(key, values) {
             .map(|s| s.to_string())
             .collect();
 
-        // Process each line individually in parallel
-        let mut tasks = Vec::new();
+        // Map phase: Process each line in parallel using Rayon
+        let all_pairs: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
+            lines.par_iter().flat_map(|line| {
+                let vm = vm::VM::new().expect("Failed to create VM");
+                let mut intermediate_pairs = Vec::new();
 
-        for line in lines {
-            let code = code.to_string();
-
-            let task = tokio::task::spawn_blocking(move || {
-                // Create a new VM instance for each line
-                let vm = vm::VM::new().map_err(|e| anyhow::anyhow!("Failed to create VM: {:?}", e))?;
-
-                vm.eval(|ctx| -> Result<Vec<(String, i32)>> {
-                    let _: () = ctx.eval(code.as_str())?;
+                vm.eval(|ctx| {
+                    let _: () = ctx.eval(code).unwrap();
                     let globals = ctx.globals();
-                    let map_fn: rquickjs::Function = globals.get("map")?;
-
-                    let mut intermediate_pairs = Vec::new();
+                    let map_fn: rquickjs::Function = globals.get("map").unwrap();
 
                     // Process this single line through the map function
-                    let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),))?;
+                    let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),)).unwrap();
 
                     // Convert JavaScript array result to Rust vector
                     if let Some(array) = result.as_array() {
@@ -92,30 +87,19 @@ function reduce(key, values) {
                             if let Ok(pair) = array.get::<rquickjs::Value>(i) {
                                 if let Some(pair_array) = pair.as_array() {
                                     if pair_array.len() >= 2 {
-                                        let key: String = pair_array.get(0)?;
-                                        let value: i32 = pair_array.get(1)?;
+                                        let key: String = pair_array.get(0).unwrap();
+                                        let value: i32 = pair_array.get(1).unwrap();
                                         intermediate_pairs.push((key, value));
                                     }
                                 }
                             }
                         }
                     }
+                });
 
-                    Ok(intermediate_pairs)
-                })
-            });
-
-            tasks.push(task);
-        }
-
-        // Collect results from all parallel tasks
-        let mut all_pairs = Vec::new();
-        for task in tasks {
-            let result = task.await
-                .map_err(|e| anyhow::anyhow!("Task execution failed: {:?}", e))?;
-            let pairs = result?;
-            all_pairs.extend(pairs);
-        }
+                intermediate_pairs
+            }).collect()
+        }).await?;
 
         // Group phase: group values by key
         let mut groups: HashMap<String, Vec<i32>> = HashMap::new();
@@ -123,37 +107,29 @@ function reduce(key, values) {
             groups.entry(key).or_insert_with(Vec::new).push(value);
         }
 
-        // Reduce phase: apply reduce function to each group in parallel
-        let mut reduce_tasks = Vec::new();
+        // Reduce phase: apply reduce function to each group in parallel using Rayon
+        let results: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
+            groups.into_par_iter().map(|(key, values)| {
+                let vm = vm::VM::new().expect("Failed to create VM");
+                let mut result = 0;
 
-        for (key, values) in groups {
-            let code = code.to_string();
-
-            let reduce_task = tokio::task::spawn_blocking(move || {
-                let vm = vm::VM::new().map_err(|e| anyhow::anyhow!("Failed to create VM: {:?}", e))?;
-
-                vm.eval(|ctx| -> Result<(String, i32)> {
-                    let _: () = ctx.eval(code.as_str())?;
+                vm.eval(|ctx| {
+                    let _: () = ctx.eval(code).unwrap();
                     let globals = ctx.globals();
-                    let reduce_fn: rquickjs::Function = globals.get("reduce")?;
+                    let reduce_fn: rquickjs::Function = globals.get("reduce").unwrap();
 
                     // Convert Rust vector to JavaScript array
                     let array_str = format!("[{}]", values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
-                    let js_array: rquickjs::Value = ctx.eval(array_str.as_str())?;
-                    let result = reduce_fn.call::<_, i32>((key.clone(), js_array))?;
+                    let js_array: rquickjs::Value = ctx.eval(array_str.as_str()).unwrap();
+                    result = reduce_fn.call::<_, i32>((key.clone(), js_array)).unwrap();
+                });
 
-                    Ok((key, result))
-                })
-            });
+                (key, result)
+            }).collect()
+        }).await?;
 
-            reduce_tasks.push(reduce_task);
-        }
-
-        // Collect and print results from all reduce tasks
-        for reduce_task in reduce_tasks {
-            let result = reduce_task.await
-                .map_err(|e| anyhow::anyhow!("Reduce task execution failed: {:?}", e))?;
-            let (key, count) = result?;
+        // Print results
+        for (key, count) in results {
             println!("{}: {}", key, count);
         }
 
