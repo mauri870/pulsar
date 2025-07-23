@@ -15,13 +15,13 @@ use rayon::prelude::*;
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
 
 #[derive(Debug, Error)]
-pub enum MapReduceError {
+pub enum PulsarError {
     #[error("no files or directories to watch")]
     NoFilesToWatch,
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "mapreduce")]
+#[command(name = "pulsar")]
 #[command(about = "A simple map-reduce engine for parallel processing")]
 #[command(author, version)]
 pub struct Cli {
@@ -54,14 +54,14 @@ impl Display for OutputFormat {
     }
 }
 
-pub struct MapReduce<R: AsyncBufReadExt + Unpin> {
+pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
     script: String,
     output_format: OutputFormat,
 }
 
-impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
-    /// Create a new MapReduce instance from CLI arguments
+impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
+    /// Create a new Pulsar instance from CLI arguments
     pub async fn from_cli(cli: Cli) -> Result<Self> {
         let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = if cli.input_file == "-" {
             // Read from stdin
@@ -82,12 +82,12 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
-        Ok(MapReduce { reader, script, output_format: cli.output_format })
+        Ok(Pulsar { reader, script, output_format: cli.output_format })
     }
 
     /// Run the application
     pub async fn run(mut self) -> Result<()> {
-        debug!("Running mapreduce");
+        debug!("Running pulsar");
         let code = self.script.clone();
         let code_for_reduce = code.clone();
 
@@ -256,9 +256,9 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 }
 
-impl<R: AsyncBufReadExt + Unpin> Debug for MapReduce<R> {
+impl<R: AsyncBufReadExt + Unpin> Debug for Pulsar<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MapReduce")
+        f.debug_struct("Pulsar")
             .field("script", &self.script)
             .finish()
     }

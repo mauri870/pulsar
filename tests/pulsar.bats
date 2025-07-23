@@ -1,4 +1,4 @@
-BIN="./target/release/mapreduce"
+BIN="./target/release/pulsar"
 
 setup_file() {
   cargo b --release

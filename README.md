@@ -1,6 +1,6 @@
-# mapreduce
+# pulsar
 
-`mapreduce` is a command-line tool that processes input data by line using user-defined map and reduce functions written in JavaScript. It is designed for high parallelism and scales well on large input streams.
+`pulsar` is a command-line tool that processes input data by line using user-defined map and reduce functions written in JavaScript. It is designed for high parallelism and scales well on large input streams.
 
 By default, if no script is specified, it performs a simple word count.
 
@@ -10,12 +10,12 @@ By default, if no script is specified, it performs a simple word count.
 cargo build --release
 ```
 
-The binary will be located at ./target/release/mapreduce.
+The binary will be located at ./target/release/pulsar.
 
 ## Usage
 
 ```bash
-./target/release/mapreduce -f input_file -s script_file
+./target/release/pulsar -f input_file -s script_file
 ```
 
 ## Examples
@@ -28,7 +28,7 @@ Counting the words in a text file:
 wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
 
 # default script does word counting, check default_script.js
-time ./target/release/mapreduce -f input.txt | sort -t':' -k2 -n
+time ./target/release/pulsar -f input.txt | sort -t':' -k2 -n
 ...
 a: 4747
 and: 6447
@@ -61,7 +61,7 @@ const map = line => line
 const reduce = (key, values) => values.length;
 EOF
 
-./target/release/mapreduce -f input.txt -s script.js
+./target/release/pulsar -f input.txt -s script.js
 ```
 
 ### Log Analysis
@@ -88,7 +88,7 @@ const reduce = (key, values) =>
   values.reduce((sum, count) => sum + count, 0);
 EOF
 
-./target/release/mapreduce -f /tmp/access.log -s script.js
+./target/release/pulsar -f /tmp/access.log -s script.js
 ```
 
 You could build on this to aggregate local vs internet IPs:
@@ -110,7 +110,7 @@ const map = line =>
 const reduce = (key, values) => Array.from(new Set(values)); // deduplicate IPs
 EOF
 
-./target/release/mapreduce -f /tmp/access.log -s script.js | sort -rn -t':' -k2
+./target/release/pulsar -f /tmp/access.log -s script.js | sort -rn -t':' -k2
 ```
 
 ## Tests

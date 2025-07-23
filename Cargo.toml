@@ -1,5 +1,5 @@
 [package]
-name = "mapreduce"
+name = "pulsar"
 version = "0.1.0"
 edition = "2024"
 

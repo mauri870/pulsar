@@ -6,8 +6,8 @@ use log::debug;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let cli = mapreduce::Cli::parse();
+    let cli = pulsar::Cli::parse();
     debug!("Parsed command line arguments: {:?}", cli);
-    let mr = mapreduce::MapReduce::from_cli(cli).await?;
+    let mr = pulsar::Pulsar::from_cli(cli).await?;
     mr.run().await
 }
