@@ -17,17 +17,18 @@ cargo build --release
 
 cat default_script.js > sort_benchmark.js
 cat >> sort_benchmark.js << 'EOF'
-const sort = (results) => 
+const sort = (results) =>
     results.sort((a, b) => a[0].localeCompare(b[0]));
 EOF
 
+echo "Benchmarking pulsar with 10M lines of input"
 hyperfine \
   --warmup 3 \
   --runs 10 \
   --export-json benchmark_results.json \
   --export-markdown benchmark_results.md \
-  './target/release/pulsar -f input.txt > /dev/null' \
-  './target/release/pulsar -f input.txt -s sort_benchmark.js > /dev/null' \
+  'for i in $(seq 1 500); do cat input.txt; done | ./target/release/pulsar -f input.txt > /dev/null' \
+  'for i in $(seq 1 500); do cat input.txt; done | ./target/release/pulsar -f input.txt -s sort_benchmark.js > /dev/null' \
   --command-name 'no-sort,with-sort'
 
 rm -f sort_benchmark.js

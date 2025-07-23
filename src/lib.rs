@@ -153,10 +153,12 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         }).await?;
 
         // group phase
-        let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        let mut groups_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
         for (key, value) in all_pairs {
-            groups.entry(key).or_insert_with(Vec::new).push(value);
+            groups_map.entry(key).or_insert_with(Vec::new).push(value);
         }
+        
+        let groups: Vec<(String, Vec<serde_json::Value>)> = groups_map.into_iter().collect();
 
         // reduce phase - unified approach with chunked VMs
         let output_format = self.output_format.clone();
@@ -232,8 +234,6 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             let sort_results = if has_sort_function { Some(Mutex::new(Vec::new())) } else { None };
 
             groups
-                .into_iter()
-                .collect::<Vec<_>>()    // Vec<T>
                 .par_chunks(CHUNK_SIZE)
                 .for_each(|chunk| {
                     let vm = vm::VM::new().expect("Failed to create VM");
