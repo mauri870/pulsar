@@ -169,6 +169,19 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                             serde_json::Value::Number(n) => n.to_string(),
                                             serde_json::Value::Bool(b) => b.to_string(),
                                             serde_json::Value::Null => "null".to_string(),
+                                            serde_json::Value::Array(arr) => {
+                                                // for plain mode print array elements as comma-separated values
+                                                arr.iter()
+                                                    .map(|v| match v {
+                                                        serde_json::Value::String(s) => s.clone(),
+                                                        serde_json::Value::Number(n) => n.to_string(),
+                                                        serde_json::Value::Bool(b) => b.to_string(),
+                                                        serde_json::Value::Null => "null".to_string(),
+                                                        _ => serde_json::to_string(v).unwrap(),
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(",")
+                                            },
                                             _ => serde_json::to_string(&result).unwrap(),
                                         };
                                         println!("{}: {}", key, display_value);
