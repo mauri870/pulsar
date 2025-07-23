@@ -1,11 +1,19 @@
-use anyhow::{Context, Result};
+mod vm;
+
+use anyhow::Result;
 use clap::Parser;
 use log::{debug};
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::io::{self, Read};
-use std::path::Path;
+use std::cell::RefCell;
+use std::io::{BufRead, BufReader};
+use std::fs::File;
 use thiserror::Error;
+
+// VM is thread-local to avoid contention
+thread_local! {
+    static VM: RefCell<Option<vm::VM>> = RefCell::new(None);
+}
 
 #[derive(Debug, Error)]
 pub enum MapReduceError {
@@ -38,24 +46,18 @@ impl MapReduce {
 impl TryFrom<Cli> for MapReduce {
     type Error = anyhow::Error;
     fn try_from(cli: Cli) -> Result<Self> {
-        let buf = if cli.input_file == "-" {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input).context("Failed to read from stdin")?;
-            input
+        let mut reader: Box<dyn BufRead> = if cli.input_file == "-" {
+            Box::new(BufReader::new(std::io::stdin()))
         } else {
-            // read input and return String
-            let path = Path::new(&cli.input_file);
-            if !path.exists() {
-                return Err(anyhow::anyhow!("Input file does not exist: {}", cli.input_file));
-            }
-            let mut file = std::fs::File::open(path).context("Failed to open input file")?;
-            let mut input = String::new();
-            file.read_to_string(&mut input).context("Failed to read input file")?;
-            input
+            Box::new(BufReader::new(File::open(&cli.input_file)?))
         };
 
+        let mut buf = String::new();
+        reader
+            .read_to_string(&mut buf)
+            .map_err(|e| anyhow::anyhow!("Failed to read input: {}", e))?;
         Ok(MapReduce {
-            buf: buf,
+            buf,
         })
     }
 }
