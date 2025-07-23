@@ -6,7 +6,7 @@ use log::{debug};
 use std::fmt::Debug;
 use std::collections::HashMap;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use rayon::prelude::*;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
@@ -31,25 +31,23 @@ pub struct Cli {
     script_file: Option<String>,
 }
 
-pub struct MapReduce {
-    buf: String,
+pub struct MapReduce<R: AsyncBufReadExt + Unpin> {
+    reader: R,
     script: String,
 }
 
-impl MapReduce {
+impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Create a new MapReduce instance from CLI arguments
     pub async fn from_cli(cli: Cli) -> Result<Self> {
-        let buf = if cli.input_file == "-" {
+        let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = if cli.input_file == "-" {
             // Read from stdin
-            let mut stdin = tokio::io::stdin();
-            let mut buf = String::new();
-            stdin.read_to_string(&mut buf).await
-                .map_err(|e| anyhow::anyhow!("Failed to read from stdin: {}", e))?;
-            buf
+            let stdin = tokio::io::stdin();
+            BufReader::new(Box::new(stdin))
         } else {
             // Read from file
-            tokio::fs::read_to_string(&cli.input_file).await
-                .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", cli.input_file, e))?
+            let file = tokio::fs::File::open(&cli.input_file).await
+                .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", cli.input_file, e))?;
+            BufReader::new(Box::new(file))
         };
 
         let script = if let Some(script_file) = cli.script_file {
@@ -60,20 +58,25 @@ impl MapReduce {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
-        Ok(MapReduce { buf, script })
+        Ok(MapReduce { reader, script })
     }
 
     /// Run the application
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         debug!("Running mapreduce");
         let code = self.script.clone();
         let code_for_reduce = code.clone();
 
         // Collect all non-empty lines
-        let lines: Vec<String> = self.buf.lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|s| s.to_string())
-            .collect();
+        let mut lines = Vec::new();
+        let mut line_buf = String::new();
+        while self.reader.read_line(&mut line_buf).await? > 0 {
+            let line = line_buf.trim();
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+            line_buf.clear();
+        }
 
         // map phase
         let all_pairs: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
@@ -159,10 +162,10 @@ impl MapReduce {
     }
 }
 
-impl Debug for MapReduce {
+impl<R: AsyncBufReadExt + Unpin> Debug for MapReduce<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MapReduce")
-            .field("buf", &self.buf)
+            .field("script", &self.script)
             .finish()
     }
 }
