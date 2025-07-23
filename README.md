@@ -27,21 +27,23 @@ Counting the words in a text file:
 
 ```bash
 # download Moby Dick from Gutenberg
-wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
+$ wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
+$ wc -l input.txt
+21940
 
-time ./target/release/pulsar -f input.txt | sort -t':' -k2 -n
+$ time cat input.txt | ./target/release/pulsar
 ...
-a: 4747
-and: 6447
-of: 6626
-the: 14537
+bluish: 2
+pedlar: 1
+magazine: 2
+reckless: 5
 
-real	0m0.980s
-user	0m26.396s
-sys	    0m0.203s
+real	0m0.282s
+user	0m2.020s
+sys	  0m0.270s
 ```
 
-You could extend it to ignore stop words as well as sorting the results (disable output streaming):
+You could provide a script to ignore stop words and sort the results:
 
 ```bash
 cat > script.js << 'EOF'
@@ -69,7 +71,8 @@ EOF
 ```
 
 ### Log Analysis
-Analyze web server logs to count status codes:
+
+Summarize web server logs to count logs per status codes:
 
 ```bash
 # generate logs
@@ -95,7 +98,7 @@ EOF
 ./target/release/pulsar -f /tmp/access.log -s script.js
 ```
 
-You could build on this to aggregate local vs internet IPs:
+You could build on this to aggregate local vs internet IPs, then print the results in json:
 
 ```bash
 cat > script.js << 'EOF'
@@ -114,11 +117,12 @@ const map = line =>
 const reduce = (key, values) => Array.from(new Set(values)); // deduplicate IPs
 EOF
 
-./target/release/pulsar -f /tmp/access.log -s script.js | sort -rn -t':' -k2
+./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
 ```
 
 ## Tests
 
 ```bash
 bats tests
+./benchmarks.sh # requires hyperfine
 ```
