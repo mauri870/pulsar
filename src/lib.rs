@@ -100,7 +100,7 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         }
 
         // map phase
-        let all_pairs: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
+        let all_pairs: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
             lines.par_iter().flat_map(|line| {
                 let vm = vm::VM::new().expect("Failed to create VM");
                 let mut intermediate_pairs = Vec::new();
@@ -127,8 +127,11 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                 if let Some(pair_array) = pair.as_array() {
                                     if pair_array.len() >= 2 {
                                         let key: String = pair_array.get(0).unwrap();
-                                        let value: i32 = pair_array.get(1).unwrap();
-                                        intermediate_pairs.push((key, value));
+                                        let value: rquickjs::Value = pair_array.get(1).unwrap();
+                                        // Convert rquickjs::Value to serde_json::Value for storage
+                                        let json_str = ctx.json_stringify(value).unwrap().unwrap().to_string().unwrap();
+                                        let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                                        intermediate_pairs.push((key, json_value));
                                     }
                                 }
                             }
@@ -141,16 +144,16 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         }).await?;
 
         // group phase
-        let mut groups: HashMap<String, Vec<i32>> = HashMap::new();
+        let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
         for (key, value) in all_pairs {
             groups.entry(key).or_insert_with(Vec::new).push(value);
         }
 
         // reduce phase 
-        let results: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
+        let results: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
             groups.into_par_iter().map(|(key, values)| {
                 let vm = vm::VM::new().expect("Failed to create VM");
-                let mut result = 0;
+                let mut result = serde_json::Value::Null;
 
                 vm.eval(|ctx| {
                     let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
@@ -164,10 +167,19 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         })
                         .expect("reduce function not found in script. Make sure to define either 'function reduce() {}' or 'const reduce = () => {}'");
 
-                    // Convert Rust vector to JavaScript array
-                    let array_str = format!("[{}]", values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
-                    let js_array: rquickjs::Value = ctx.eval(array_str.as_str()).unwrap();
-                    result = reduce_fn.call::<_, i32>((key.clone(), js_array)).unwrap();
+                    // Convert serde_json::Values back to rquickjs::Values
+                    let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
+                    for (i, v) in values.iter().enumerate() {
+                        let js_val: rquickjs::Value = ctx.json_parse(serde_json::to_string(v).unwrap()).unwrap();
+                        js_array.set(i, js_val).unwrap();
+                    }
+                    
+                    let reduce_result: rquickjs::Value = reduce_fn.call((key.clone(), js_array)).unwrap();
+                    
+                    // Convert result back to serde_json::Value
+                    let js_string = ctx.json_stringify(reduce_result).unwrap().unwrap();
+                    let json_str: String = js_string.to_string().unwrap();
+                    result = serde_json::from_str(&json_str).unwrap();
                 });
 
                 (key, result)
@@ -177,13 +189,21 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // Print results
         match self.output_format {
             OutputFormat::Plain => {
-                for (key, count) in results {
-                    println!("{}: {}", key, count);
+                for (key, value) in results {
+                    // Convert serde_json::Value to a nice display format for plain output
+                    let display_value = match &value {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        serde_json::Value::Null => "null".to_string(),
+                        _ => serde_json::to_string(&value).unwrap(),
+                    };
+                    println!("{}: {}", key, display_value);
                 }
             }
             OutputFormat::Json => {
-                for (key, count) in results {
-                    println!("{{\"{}\": {}}}", key, count);
+                for (key, value) in results {
+                    println!("{{\"{}\": {}}}", key, serde_json::to_string(&value).unwrap());
                 }
             }
         }

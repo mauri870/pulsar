@@ -115,6 +115,40 @@ EOF
   rm -rf "$TMPDIR"
 }
 
+@test "map reduce returning strings" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  # custom script that returns string values instead of numbers
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = (line) => {
+  const num = parseInt(line);
+  const category = num % 2 === 0 ? "even" : "odd";
+  return [[category, line]];
+};
+
+const reduce = (key, values) => {
+  return `${values.join(",")}`;
+};
+EOF
+
+  # Test with custom script file
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ $(echo "$output" | wc -l) -eq 2 ]]
+  [[ "$output" =~ "even: 0,2" ]]
+  [[ "$output" =~ "odd: 1,3" ]]
+
+  rm -rf "$TMPDIR"
+}
+
 @test "custom script with syntax error" {
   TMPDIR=$(mktemp -d)
   TESTFILE="$TMPDIR/test.txt"
@@ -162,7 +196,6 @@ EOF
   run cat "$OUTFILE"
   [ "$status" -eq 0 ]
 
-  # Check that we get correct word counts
   [[ "$output" =~ '{"hello": 2}' ]]
   [[ "$output" =~ '{"world": 1}' ]]
 
