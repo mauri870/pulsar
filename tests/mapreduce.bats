@@ -1,5 +1,11 @@
-setup() {
-    BIN="./target/debug/mapreduce"
+BIN="./target/release/mapreduce"
+
+setup_file() {
+  cargo b --release
+}
+
+diag() {
+  echo "# DEBUG $@" >&3
 }
 
 @test "file input" {
@@ -14,7 +20,7 @@ setup() {
 
   run cat "$OUTFILE"
   [ "$status" -eq 0 ]
-  
+
   # Check that we get word counts for each word
   [[ "$(echo "$output" | wc -l)" -eq 8 ]]
   [[ "$output" =~ "the: 2" ]]
@@ -25,7 +31,7 @@ setup() {
   [[ "$output" =~ "over: 1" ]]
   [[ "$output" =~ "lazy: 1" ]]
   [[ "$output" =~ "dog: 1" ]]
-  
+
   rm -rf "$TMPDIR"
 }
 
@@ -38,10 +44,45 @@ setup() {
 
   run cat "$OUTFILE"
   [ "$status" -eq 0 ]
-  
+
   # Check that we get correct word counts
   [[ "$output" =~ "hello: 2" ]]
   [[ "$output" =~ "world: 1" ]]
-  
+
+  rm -rf "$TMPDIR"
+}
+
+@test "custom script file" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  # custom script that doubles the value of each line
+  cat > "$SCRIPTFILE" << 'EOF'
+function map(line) {
+  return [[line, parseInt(line) * 2]];
+}
+
+function reduce(key, values) {
+  return values[0];
+}
+EOF
+
+  # Test with custom script file
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  diag "$output"
+  [[ $(echo "$output" | wc -l) -eq 4 ]]
+  [[ "$output" =~ "0: 0" ]]
+  [[ "$output" =~ "1: 2" ]]
+  [[ "$output" =~ "2: 4" ]]
+  [[ "$output" =~ "3: 6" ]]
+
   rm -rf "$TMPDIR"
 }

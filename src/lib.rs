@@ -20,13 +20,18 @@ pub enum MapReduceError {
 #[command(about = "A simple map-reduce engine for parallel processing")]
 #[command(author, version)]
 pub struct Cli {
-    /// File or directory to watch. To specify multiple files or directories, use standard input instead.
+    /// Input file to read input data from.
     #[arg(short = 'f', default_value = "-")]
     input_file: String,
+    
+    /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
+    #[arg(short = 's', long = "script")]
+    script_file: Option<String>,
 }
 
 pub struct MapReduce {
-    buf: String
+    buf: String,
+    script: String,
 }
 
 impl MapReduce {
@@ -45,13 +50,13 @@ impl MapReduce {
                 .map_err(|e| anyhow::anyhow!("Failed to read file {}: {}", cli.input_file, e))?
         };
 
-        Ok(MapReduce { buf })
-    }
-
-    /// Run the application
-    pub async fn run(self) -> Result<()> {
-        debug!("Running mapreduce");
-        let code = r#"
+        let script = if let Some(script_file) = cli.script_file {
+            // Read custom script from file
+            tokio::fs::read_to_string(&script_file).await
+                .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", script_file, e))?
+        } else {
+            // Use default word count script
+            r#"
 function map(line) {
   return line.split(/\s+/).map(word => [word.toLowerCase(), 1]);
 }
@@ -59,7 +64,16 @@ function map(line) {
 function reduce(key, values) {
   return values.reduce((a, b) => a + b, 0);
 }
-"#;
+"#.to_string()
+        };
+        Ok(MapReduce { buf, script })
+    }
+
+    /// Run the application
+    pub async fn run(self) -> Result<()> {
+        debug!("Running mapreduce");
+        let code = self.script.clone();
+        let code_for_reduce = code.clone();
 
         // Collect all non-empty lines
         let lines: Vec<String> = self.buf.lines()
@@ -67,14 +81,14 @@ function reduce(key, values) {
             .map(|s| s.to_string())
             .collect();
 
-        // Map phase: Process each line in parallel using Rayon
+        // map phase
         let all_pairs: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
             lines.par_iter().flat_map(|line| {
                 let vm = vm::VM::new().expect("Failed to create VM");
                 let mut intermediate_pairs = Vec::new();
 
                 vm.eval(|ctx| {
-                    let _: () = ctx.eval(code).unwrap();
+                    let _: () = ctx.eval(code.as_str()).unwrap();
                     let globals = ctx.globals();
                     let map_fn: rquickjs::Function = globals.get("map").unwrap();
 
@@ -101,20 +115,20 @@ function reduce(key, values) {
             }).collect()
         }).await?;
 
-        // Group phase: group values by key
+        // group phase
         let mut groups: HashMap<String, Vec<i32>> = HashMap::new();
         for (key, value) in all_pairs {
             groups.entry(key).or_insert_with(Vec::new).push(value);
         }
 
-        // Reduce phase: apply reduce function to each group in parallel using Rayon
+        // reduce phase 
         let results: Vec<(String, i32)> = tokio::task::spawn_blocking(move || {
             groups.into_par_iter().map(|(key, values)| {
                 let vm = vm::VM::new().expect("Failed to create VM");
                 let mut result = 0;
 
                 vm.eval(|ctx| {
-                    let _: () = ctx.eval(code).unwrap();
+                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
                     let globals = ctx.globals();
                     let reduce_fn: rquickjs::Function = globals.get("reduce").unwrap();
 
