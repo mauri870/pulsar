@@ -1,1 +1,4 @@
 /target
+input.txt
+benchmark_results.json
+benchmark_results.md
