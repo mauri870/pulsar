@@ -5,6 +5,7 @@ use clap::{Parser, ValueEnum};
 use log::{debug};
 use std::fmt::{Debug, Display};
 use std::collections::HashMap;
+use std::io::{self, Write};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -185,9 +186,11 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                             _ => serde_json::to_string(&result).unwrap(),
                                         };
                                         println!("{}: {}", key, display_value);
+                                        io::stdout().flush().unwrap(); // Force immediate output
                                     }
                                     OutputFormat::Json => {
                                         println!("{{\"{}\": {}}}", key, serde_json::to_string(&result).unwrap());
+                                        io::stdout().flush().unwrap(); // Force immediate output
                                     }
                                 }
                             }
