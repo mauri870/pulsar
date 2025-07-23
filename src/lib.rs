@@ -8,6 +8,7 @@ use std::fmt::Debug;
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader};
 use std::fs::File;
+use std::collections::HashMap;
 use thiserror::Error;
 
 // VM is thread-local to avoid contention
@@ -39,7 +40,77 @@ impl MapReduce {
     /// Run the application
     pub fn run(self) -> Result<()> {
         debug!("Running mapreduce");
-        Ok(())
+        let code = r#"
+function map(line) {
+  return line.split(/\s+/).map(word => [word.toLowerCase(), 1]);
+}
+
+function reduce(key, values) {
+  return values.reduce((a, b) => a + b, 0);
+}
+"#;
+
+        let vm_result = VM.with(|vm_cell| {
+            let mut vm_opt = vm_cell.borrow_mut();
+            if vm_opt.is_none() {
+                *vm_opt = Some(vm::VM::new().expect("failed to initialize QJS VM"));
+            }
+            
+            vm_opt.as_ref().unwrap().eval(|ctx| -> Result<()> {
+                let _: () = ctx.eval(code)?;
+                
+                let globals = ctx.globals();
+                let map_fn: rquickjs::Function = globals.get("map")?;
+                let reduce_fn: rquickjs::Function = globals.get("reduce")?;
+                
+                let mut intermediate_pairs: Vec<(String, i32)> = Vec::new();
+                
+                for line in self.buf.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    
+                    let result = map_fn.call::<_, rquickjs::Value>((line,))?;
+                    
+                    // Convert JavaScript array result to Rust vector
+                    if let Some(array) = result.as_array() {
+                        for i in 0..array.len() {
+                            if let Ok(pair) = array.get::<rquickjs::Value>(i) {
+                                if let Some(pair_array) = pair.as_array() {
+                                    if pair_array.len() >= 2 {
+                                        let key: String = pair_array.get(0)?;
+                                        let value: i32 = pair_array.get(1)?;
+                                        intermediate_pairs.push((key, value));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group phase: group values by key
+                let mut groups: HashMap<String, Vec<i32>> = std::collections::HashMap::new();
+                for (key, value) in intermediate_pairs {
+                    groups.entry(key).or_insert_with(Vec::new).push(value);
+                }
+                
+                // Reduce phase: apply reduce function to each group
+                for (key, values) in groups {
+                    // Convert Rust vector to JavaScript array
+                    let array_str = format!("[{}]", values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                    let js_array: rquickjs::Value = ctx.eval(array_str.as_str())?;
+                    let result = reduce_fn.call::<_, i32>((key.clone(), js_array))?;
+                    println!("{}: {}", key, result);
+                }
+                
+                Ok(())
+            })
+        });
+        
+        match vm_result {
+            Ok(_) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("VM execution failed: {:?}", e)),
+        }
     }
 }
 

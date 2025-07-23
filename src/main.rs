@@ -10,6 +10,5 @@ fn main() -> Result<()> {
     let cli = mapreduce::Cli::parse();
     debug!("Parsed command line arguments: {:?}", cli);
     let mr: mapreduce::MapReduce = cli.try_into()?;
-    debug!("Starting mapreduce with configuration: {:?}", mr);
     mr.run()
 }
