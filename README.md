@@ -1,8 +1,10 @@
 # pulsar
 
-`pulsar` is a command-line tool that processes input data by line using user-defined map and reduce functions written in JavaScript. It is designed for high parallelism and scales well on large input streams.
+`pulsar` is a cli tool that provides a high-performance MapReduce engine that processes large datasets using user-defined functions written in JavaScript.
 
-By default, if no script is specified, it performs a simple word count.
+Features include parallel processing thanks to rayon, JS scripting with QuickJS, support for streaming output, single or multiple reduce results, ndjson output and optional sorting function (disables output streaming).
+
+By default, if no script is specified, it performs a simple word count. Check the `default_script.js` for the default behavior and options.
 
 ## Compilation
 
@@ -27,7 +29,6 @@ Counting the words in a text file:
 # download Moby Dick from Gutenberg
 wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
 
-# default script does word counting, check default_script.js
 time ./target/release/pulsar -f input.txt | sort -t':' -k2 -n
 ...
 a: 4747
