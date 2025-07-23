@@ -5,6 +5,7 @@ use clap::{Parser, ValueEnum};
 use log::{debug};
 use std::fmt::{Debug, Display};
 use std::collections::HashMap;
+use std::sync::mpsc;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use rayon::prelude::*;
@@ -29,7 +30,7 @@ pub struct Cli {
     /// Output format for the results.
     #[arg(long = "output", default_value_t = OutputFormat::Plain)]
     output_format: OutputFormat,
-    
+
     /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
     #[arg(short = 's', long = "script")]
     script_file: Option<String>,
@@ -149,9 +150,35 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             groups.entry(key).or_insert_with(Vec::new).push(value);
         }
 
-        // reduce phase 
-        let results: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
-            groups.into_par_iter().map(|(key, values)| {
+        // reduce phase, stream results as we compute them
+        let output_format = self.output_format.clone();
+        let (tx, rx) = mpsc::channel::<(String, serde_json::Value)>();
+
+        // Spawn a task to handle output in order
+        let output_handle = tokio::task::spawn_blocking(move || {
+            for (key, result) in rx {
+                match output_format {
+                    OutputFormat::Plain => {
+                        // Convert serde_json::Value to a nice display format for plain output
+                        let display_value = match &result {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Number(n) => n.to_string(),
+                            serde_json::Value::Bool(b) => b.to_string(),
+                            serde_json::Value::Null => "null".to_string(),
+                            _ => serde_json::to_string(&result).unwrap(),
+                        };
+                        println!("{}: {}", key, display_value);
+                    }
+                    OutputFormat::Json => {
+                        println!("{{\"{}\": {}}}", key, serde_json::to_string(&result).unwrap());
+                    }
+                }
+            }
+        });
+
+        // Process reduce operations in parallel but send results to output thread
+        tokio::task::spawn_blocking(move || {
+            groups.into_par_iter().for_each(|(key, values)| {
                 let vm = vm::VM::new().expect("Failed to create VM");
                 let mut result = serde_json::Value::Null;
 
@@ -182,31 +209,14 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     result = serde_json::from_str(&json_str).unwrap();
                 });
 
-                (key, result)
-            }).collect()
+                // Send result to output thread for streaming
+                tx.send((key, result)).unwrap();
+            });
+            drop(tx);
         }).await?;
 
-        // Print results
-        match self.output_format {
-            OutputFormat::Plain => {
-                for (key, value) in results {
-                    // Convert serde_json::Value to a nice display format for plain output
-                    let display_value = match &value {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        serde_json::Value::Null => "null".to_string(),
-                        _ => serde_json::to_string(&value).unwrap(),
-                    };
-                    println!("{}: {}", key, display_value);
-                }
-            }
-            OutputFormat::Json => {
-                for (key, value) in results {
-                    println!("{{\"{}\": {}}}", key, serde_json::to_string(&value).unwrap());
-                }
-            }
-        }
+        // Wait for all output to complete
+        output_handle.await?;
 
         Ok(())
     }
