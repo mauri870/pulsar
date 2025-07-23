@@ -14,7 +14,7 @@ use tokio::signal;
 use rayon::prelude::*;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
-const CHUNK_SIZE: usize = 1024;
+const CHUNK_SIZE: usize = 128;
 
 #[derive(Debug, Error)]
 pub enum PulsarError {
@@ -106,9 +106,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // map phase
         let all_pairs: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
-            lines.chunks(CHUNK_SIZE)
-                .collect::<Vec<_>>()
-                .par_iter()
+            lines.par_chunks(CHUNK_SIZE)
                 .flat_map(|chunk| {
                     let vm = vm::VM::new().expect("Failed to create VM");
                     let mut all_intermediate_pairs = Vec::new();
