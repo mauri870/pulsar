@@ -5,9 +5,10 @@ use clap::{Parser, ValueEnum};
 use log::{debug};
 use std::fmt::{Debug, Display};
 use std::collections::HashMap;
-use std::sync::mpsc;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
+use tokio::signal;
 use rayon::prelude::*;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
@@ -152,31 +153,48 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // reduce phase, stream results as we compute them
         let output_format = self.output_format.clone();
-        let (tx, rx) = mpsc::channel::<(String, serde_json::Value)>();
+        let (tx, mut rx) = mpsc::channel::<(String, serde_json::Value)>(1000);
 
-        // Spawn a task to handle output in order
-        let output_handle = tokio::task::spawn_blocking(move || {
-            for (key, result) in rx {
-                match output_format {
-                    OutputFormat::Plain => {
-                        // Convert serde_json::Value to a nice display format for plain output
-                        let display_value = match &result {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Number(n) => n.to_string(),
-                            serde_json::Value::Bool(b) => b.to_string(),
-                            serde_json::Value::Null => "null".to_string(),
-                            _ => serde_json::to_string(&result).unwrap(),
-                        };
-                        println!("{}: {}", key, display_value);
+        let control_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = rx.recv() => {
+                        match result {
+                            Some((key, result)) => {
+                                match output_format {
+                                    OutputFormat::Plain => {
+                                        // Convert serde_json::Value to a nice display format for plain output
+                                        let display_value = match &result {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            serde_json::Value::Number(n) => n.to_string(),
+                                            serde_json::Value::Bool(b) => b.to_string(),
+                                            serde_json::Value::Null => "null".to_string(),
+                                            _ => serde_json::to_string(&result).unwrap(),
+                                        };
+                                        println!("{}: {}", key, display_value);
+                                    }
+                                    OutputFormat::Json => {
+                                        println!("{{\"{}\": {}}}", key, serde_json::to_string(&result).unwrap());
+                                    }
+                                }
+                            }
+                            None => {
+                                // all results processed
+                                break;
+                            }
+                        }
                     }
-                    OutputFormat::Json => {
-                        println!("{{\"{}\": {}}}", key, serde_json::to_string(&result).unwrap());
+                    _ = signal::ctrl_c() => {
+                        eprintln!("Received Ctrl+C, shutting down gracefully...");
+                        break;
                     }
                 }
             }
         });
 
         // Process reduce operations in parallel but send results to output thread
+        let tx_clone = tx.clone();
+        drop(tx); // Drop original to ensure proper channel closure
         tokio::task::spawn_blocking(move || {
             groups.into_par_iter().for_each(|(key, values)| {
                 let vm = vm::VM::new().expect("Failed to create VM");
@@ -185,7 +203,7 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 vm.eval(|ctx| {
                     let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
                     let globals = ctx.globals();
-                    
+
                     // Try to get reduce function - support both function declarations and const assignments
                     let reduce_fn: rquickjs::Function = globals.get("reduce")
                         .or_else(|_| {
@@ -200,9 +218,9 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         let js_val: rquickjs::Value = ctx.json_parse(serde_json::to_string(v).unwrap()).unwrap();
                         js_array.set(i, js_val).unwrap();
                     }
-                    
+
                     let reduce_result: rquickjs::Value = reduce_fn.call((key.clone(), js_array)).unwrap();
-                    
+
                     // Convert result back to serde_json::Value
                     let js_string = ctx.json_stringify(reduce_result).unwrap().unwrap();
                     let json_str: String = js_string.to_string().unwrap();
@@ -210,13 +228,13 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 });
 
                 // Send result to output thread for streaming
-                tx.send((key, result)).unwrap();
+                tx_clone.blocking_send((key, result)).unwrap();
             });
-            drop(tx);
+            // Drop the sender to signal completion
+            drop(tx_clone);
         }).await?;
 
-        // Wait for all output to complete
-        output_handle.await?;
+        control_handle.await?;
 
         Ok(())
     }

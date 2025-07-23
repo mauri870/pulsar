@@ -91,7 +91,7 @@ EOF
 ./target/release/mapreduce -f /tmp/access.log -s script.js
 ```
 
-You could build on this to aggregate by local vs internet IPs:
+You could build on this to aggregate local vs internet IPs:
 
 ```bash
 cat > script.js << 'EOF'
@@ -100,10 +100,14 @@ const isLocal = ip => {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
 };
 
-const map = line => [...line.matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)]
-  .map(m => isLocal(m[1]) ? ["local", 1] : ["internet", 1]);
+const map = line =>
+  [...line.matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)].map(m => {
+    const ip = m[1];
+    const type = isLocal(ip) ? "local" : "internet";
+    return [type, ip];
+  });
 
-const reduce = (key, values) => values.reduce((a, b) => a + b, 0);
+const reduce = (key, values) => Array.from(new Set(values)); // deduplicate IPs
 EOF
 
 ./target/release/mapreduce -f /tmp/access.log -s script.js | sort -rn -t':' -k2
