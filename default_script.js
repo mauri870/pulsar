@@ -1,7 +1,9 @@
-function map(line) {
-  return line.split(/\s+/).map(word => [word.toLowerCase(), 1]);
-}
+const map = (line) => line
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ') // keep only letters and numbers, Unicode-aware
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(word => [word, 1]);
 
-function reduce(key, values) {
-  return values.reduce((a, b) => a + b, 0);
-}
+const reduce = (key, values) => values.length; // count occurrences of each word

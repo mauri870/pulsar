@@ -77,12 +77,60 @@ EOF
   run cat "$OUTFILE"
   [ "$status" -eq 0 ]
 
-  diag "$output"
   [[ $(echo "$output" | wc -l) -eq 4 ]]
   [[ "$output" =~ "0: 0" ]]
   [[ "$output" =~ "1: 2" ]]
   [[ "$output" =~ "2: 4" ]]
   [[ "$output" =~ "3: 6" ]]
 
+  rm -rf "$TMPDIR"
+}
+
+@test "custom script with const and arrow functions" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  # custom script that doubles the value of each line
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = (line) => [[line, parseInt(line) * 2]];
+var reduce = (key, values) => values[0];
+EOF
+
+  # Test with custom script file
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ $(echo "$output" | wc -l) -eq 4 ]]
+  [[ "$output" =~ "0: 0" ]]
+  [[ "$output" =~ "1: 2" ]]
+  [[ "$output" =~ "2: 4" ]]
+  [[ "$output" =~ "3: 6" ]]
+
+  rm -rf "$TMPDIR"
+}
+
+@test "custom script with syntax error" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map =
+var reduce = (key, values) => values[0];
+EOF
+
+  # Test with custom script file
+  run "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "Failed to evaluate js script: Exception" ]]
   rm -rf "$TMPDIR"
 }

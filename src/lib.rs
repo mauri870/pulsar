@@ -82,9 +82,16 @@ impl MapReduce {
                 let mut intermediate_pairs = Vec::new();
 
                 vm.eval(|ctx| {
-                    let _: () = ctx.eval(code.as_str()).unwrap();
+                    let _: () = ctx.eval(code.as_str()).expect("Failed to evaluate js script");
                     let globals = ctx.globals();
-                    let map_fn: rquickjs::Function = globals.get("map").unwrap();
+
+                    // get the map function, support both function declaration and const assignment
+                    let map_fn: rquickjs::Function = globals.get("map")
+                        .or_else(|_| {
+                            // try with const map
+                            ctx.eval("map")
+                        })
+                        .expect("map function not found in script. Make sure to define either 'function map() {}' or 'const map = () => {}'");
 
                     // Process this single line through the map function
                     let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),)).unwrap();
@@ -124,7 +131,14 @@ impl MapReduce {
                 vm.eval(|ctx| {
                     let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
                     let globals = ctx.globals();
-                    let reduce_fn: rquickjs::Function = globals.get("reduce").unwrap();
+                    
+                    // Try to get reduce function - support both function declarations and const assignments
+                    let reduce_fn: rquickjs::Function = globals.get("reduce")
+                        .or_else(|_| {
+                            // If direct access fails, try evaluating "reduce" to get the const
+                            ctx.eval("reduce")
+                        })
+                        .expect("reduce function not found in script. Make sure to define either 'function reduce() {}' or 'const reduce = () => {}'");
 
                     // Convert Rust vector to JavaScript array
                     let array_str = format!("[{}]", values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
