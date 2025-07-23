@@ -1,4 +1,4 @@
-const map = (line) => line
+const map = line => line
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ') // only letters and numbers
     .trim()
