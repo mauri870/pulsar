@@ -233,9 +233,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
             groups
                 .into_iter()
-                .collect::<Vec<_>>()
-                .chunks(CHUNK_SIZE)
-                .par_bridge()
+                .collect::<Vec<_>>()    // Vec<T>
+                .par_chunks(CHUNK_SIZE)
                 .for_each(|chunk| {
                     let vm = vm::VM::new().expect("Failed to create VM");
                     vm.eval(|ctx| {
