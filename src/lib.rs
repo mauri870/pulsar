@@ -9,6 +9,8 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use rayon::prelude::*;
 
+const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
+
 #[derive(Debug, Error)]
 pub enum MapReduceError {
     #[error("no files or directories to watch")]
@@ -56,15 +58,7 @@ impl MapReduce {
                 .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", script_file, e))?
         } else {
             // Use default word count script
-            r#"
-function map(line) {
-  return line.split(/\s+/).map(word => [word.toLowerCase(), 1]);
-}
-
-function reduce(key, values) {
-  return values.reduce((a, b) => a + b, 0);
-}
-"#.to_string()
+            DEFAULT_SCRIPT.into()
         };
         Ok(MapReduce { buf, script })
     }
