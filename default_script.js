@@ -1,6 +1,6 @@
 const map = (line) => line
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ') // keep only letters and numbers, Unicode-aware
+    .replace(/[^\p{L}\p{N}]+/gu, ' ') // only letters and numbers
     .trim()
     .split(/\s+/)
     .filter(Boolean)
