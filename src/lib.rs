@@ -1,9 +1,9 @@
 mod vm;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::{debug};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -25,15 +25,36 @@ pub struct Cli {
     /// Input file to read input data from.
     #[arg(short = 'f', default_value = "-")]
     input_file: String,
+
+    /// Output format for the results.
+    #[arg(long = "output", default_value_t = OutputFormat::Plain)]
+    output_format: OutputFormat,
     
     /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
     #[arg(short = 's', long = "script")]
     script_file: Option<String>,
 }
 
+#[derive(Debug, Clone, ValueEnum, Default)]
+enum OutputFormat {
+    #[default]
+    Plain,
+    Json,
+}
+
+impl Display for OutputFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OutputFormat::Plain => write!(f, "plain"),
+            OutputFormat::Json => write!(f, "json"),
+        }
+    }
+}
+
 pub struct MapReduce<R: AsyncBufReadExt + Unpin> {
     reader: R,
     script: String,
+    output_format: OutputFormat,
 }
 
 impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -58,7 +79,7 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
-        Ok(MapReduce { reader, script })
+        Ok(MapReduce { reader, script, output_format: cli.output_format })
     }
 
     /// Run the application
@@ -154,8 +175,17 @@ impl MapReduce<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         }).await?;
 
         // Print results
-        for (key, count) in results {
-            println!("{}: {}", key, count);
+        match self.output_format {
+            OutputFormat::Plain => {
+                for (key, count) in results {
+                    println!("{}: {}", key, count);
+                }
+            }
+            OutputFormat::Json => {
+                for (key, count) in results {
+                    println!("{{\"{}\": {}}}", key, count);
+                }
+            }
         }
 
         Ok(())

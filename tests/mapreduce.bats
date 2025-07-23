@@ -134,3 +134,37 @@ EOF
   [[ "$output" =~ "Failed to evaluate js script: Exception" ]]
   rm -rf "$TMPDIR"
 }
+
+@test "output plain" {
+  TMPDIR=$(mktemp -d)
+  OUTFILE="$TMPDIR/out.txt"
+
+  # Test with stdin input
+  echo "hello world hello" | "$BIN" --output=plain > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  # Check that we get correct word counts
+  [[ "$output" =~ "hello: 2" ]]
+  [[ "$output" =~ "world: 1" ]]
+
+  rm -rf "$TMPDIR"
+}
+
+@test "output json" {
+  TMPDIR=$(mktemp -d)
+  OUTFILE="$TMPDIR/out.txt"
+
+  # Test with stdin input
+  echo "hello world hello" | "$BIN" --output=json > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  # Check that we get correct word counts
+  [[ "$output" =~ '{"hello": 2}' ]]
+  [[ "$output" =~ '{"world": 1}' ]]
+
+  rm -rf "$TMPDIR"
+}
