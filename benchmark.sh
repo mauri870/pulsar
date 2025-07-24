@@ -21,14 +21,14 @@ const sort = (results) =>
     results.sort((a, b) => a[0].localeCompare(b[0]));
 EOF
 
-echo "Benchmarking pulsar with 200k lines of input"
+echo "Benchmarking"
 hyperfine \
   --warmup 3 \
   --runs 10 \
   --export-json benchmark_results.json \
   --export-markdown benchmark_results.md \
-  'for i in $(seq 1 10); do cat input.txt; done | ./target/release/pulsar > /dev/null' \
-  'for i in $(seq 1 10); do cat input.txt; done | ./target/release/pulsar -s sort_benchmark.js > /dev/null' \
+  'cat input.txt | ./target/release/pulsar > /dev/null' \
+  'cat input.txt | ./target/release/pulsar -s sort_benchmark.js > /dev/null' \
   --command-name 'no-sort,with-sort'
 
 rm -f sort_benchmark.js
