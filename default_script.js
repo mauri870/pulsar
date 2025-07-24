@@ -1,7 +1,7 @@
 // Map function:
 // Receives a single line of input.
 // Should return an array of [key, value] pairs to emit from this line.
-const map = line => line
+const map = async line => line
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, ' ') // only letters and numbers
     .trim()
@@ -12,7 +12,7 @@ const map = line => line
 // Reduce function:
 // Receives a key and all values associated with that key.
 // Should return a aggregated value for the key.
-const reduce = (key, values) => values.length; // count occurrences of each word
+const reduce = async (key, values) => values.length; // count occurrences of each word
 
 // Sort function:
 // Receives the full list of [key, value] pairs after reduction.
