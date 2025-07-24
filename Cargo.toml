@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rquickjs =  { version = "0.9.0", features = ["parallel"] }
+llrt_modules = { path = "llrt/llrt_modules", default-features = true }
+rquickjs = { git = "https://github.com/DelSkayn/rquickjs.git", version = "0.9.0", features = ["full-async"] }
 log = "0.4.17"
 clap = { version = "4.0.4", features = ["derive", "cargo"]}
 env_logger = "0.11.8"

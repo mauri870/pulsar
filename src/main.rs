@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use log::debug;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     env_logger::init();
 

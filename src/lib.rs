@@ -3,7 +3,6 @@ mod vm;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::debug;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::io::{self, Write};
@@ -111,51 +110,54 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             line_buf.clear();
         }
 
-        // map phase
-        let all_pairs: Vec<(String, serde_json::Value)> = tokio::task::spawn_blocking(move || {
-            lines.par_chunks(CHUNK_SIZE)
-                .flat_map(|chunk| {
-                    let vm = vm::VM::new().expect("Failed to create VM");
-                    let mut all_intermediate_pairs = Vec::new();
-
-                    vm.eval(|ctx| {
-                        // Evaluate script once per VM (for the entire chunk)
-                        let _: () = ctx.eval(code.as_str()).expect("Failed to evaluate js script");
-                        let globals = ctx.globals();
-
-                        // get the map function, support both function declaration and const assignment
-                        let map_fn: rquickjs::Function = globals.get("map")
-                            .or_else(|_| ctx.eval("map"))
-                            .expect("map function not found in script. Make sure to define either 'function map() {}' or 'const map = () => {}'");
-
-                        // Process all lines in this chunk
-                        for line in chunk.iter() {
-                            let result = map_fn.call::<_, rquickjs::Value>((line.as_str(),)).unwrap();
-
-                            // Convert JavaScript array result to Rust vector
-                            if let Some(array) = result.as_array() {
-                                for i in 0..array.len() {
-                                    if let Ok(pair) = array.get::<rquickjs::Value>(i) {
-                                        if let Some(pair_array) = pair.as_array() {
-                                            if pair_array.len() >= 2 {
-                                                let key: String = pair_array.get(0).unwrap();
-                                                let value: rquickjs::Value = pair_array.get(1).unwrap();
-                                                // Convert rquickjs::Value to serde_json::Value for storage
-                                                let json_str = ctx.json_stringify(value).unwrap().unwrap().to_string().unwrap();
-                                                let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-                                                all_intermediate_pairs.push((key, json_value));
-                                            }
+        // map phase - async approach with chunked processing
+        let mut all_pairs = Vec::new();
+        
+        for chunk in lines.chunks(CHUNK_SIZE) {
+            let vm = vm::VM::new().await.expect("Failed to create VM");
+            
+            // Evaluate script once per VM
+            vm.eval_script(&code).await.map_err(|e| {
+                anyhow::anyhow!("Failed to evaluate js script: {:?}", e)
+            })?;
+            
+            for line in chunk.iter() {
+                let line_clone = line.clone();
+                
+                // Use the new async function calling method
+                let result = vm.call_function_with_string("map", line_clone).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to call map function: {:?}", e)
+                })?;
+                
+                // Parse the JSON result back into key-value pairs
+                let pairs = vm.eval(move |ctx| {
+                    let mut chunk_pairs = Vec::new();
+                    
+                    // Try to parse the result as JSON
+                    if let Ok(js_result) = ctx.json_parse(result.clone()) {
+                        if let Some(array) = js_result.as_array() {
+                            for i in 0..array.len() {
+                                if let Ok(pair) = array.get::<rquickjs::Value>(i) {
+                                    if let Some(pair_array) = pair.as_array() {
+                                        if pair_array.len() >= 2 {
+                                            let key: String = pair_array.get(0).unwrap();
+                                            let value: rquickjs::Value = pair_array.get(1).unwrap();
+                                            let json_str = ctx.json_stringify(value).unwrap().unwrap().to_string().unwrap();
+                                            let json_value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                                            chunk_pairs.push((key, json_value));
                                         }
                                     }
                                 }
                             }
                         }
-                    });
-
-                    all_intermediate_pairs
-                })
-                .collect()
-        }).await?;
+                    }
+                    
+                    chunk_pairs
+                }).await;
+                
+                all_pairs.extend(pairs);
+            }
+        }
 
         // group phase
         let mut groups_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -222,124 +224,94 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let tx_clone = tx.clone();
         drop(tx); // Drop original to ensure proper channel closure
 
-        tokio::task::spawn_blocking(move || {
-            // Check if we have a sort function
-            let has_sort_function = {
-                let vm = vm::VM::new().expect("Failed to create VM for sort check");
-                let mut has_sort = false;
-                vm.eval(|ctx| {
-                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap_or(());
-                    let globals = ctx.globals();
-                    has_sort = globals.get("sort").map(|_: rquickjs::Function| ()).is_ok()
-                        || ctx.eval("sort").map(|_: rquickjs::Function| ()).is_ok();
-                });
-                has_sort
-            };
+        // Check if we have a sort function
+        let has_sort_function = {
+            let vm = vm::VM::new().await.expect("Failed to create VM for sort check");
+            let mut has_sort = false;
+            vm.eval(|ctx| {
+                let _: () = ctx.eval(code_for_reduce.as_str()).unwrap_or(());
+                let globals = ctx.globals();
+                has_sort = globals.get("sort").map(|_: rquickjs::Function| ()).is_ok()
+                    || ctx.eval("sort").map(|_: rquickjs::Function| ()).is_ok();
+            }).await;
+            has_sort
+        };
 
-            let sort_results = if has_sort_function {
-                Some(Mutex::new(Vec::new()))
-            } else {
-                None
-            };
+        let sort_results = if has_sort_function {
+            Some(Mutex::new(Vec::new()))
+        } else {
+            None
+        };
 
-            groups.par_chunks(CHUNK_SIZE).for_each(|chunk| {
-                let vm = vm::VM::new().expect("Failed to create VM");
-                vm.eval(|ctx| {
-                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
-                    let globals = ctx.globals();
-                    let reduce_fn: rquickjs::Function = globals
-                        .get("reduce")
-                        .or_else(|_| ctx.eval("reduce"))
-                        .expect("reduce function not found");
+        // Process groups using async VMs
+        for chunk in groups.chunks(CHUNK_SIZE) {
+            let vm = vm::VM::new().await.expect("Failed to create VM");
+            vm.eval_script(&code_for_reduce).await.map_err(|e| {
+                anyhow::anyhow!("Failed to evaluate JavaScript script for reduce: {:?}", e)
+            })?;
+            
+            for (key, values) in chunk.iter() {
+                let key_clone = key.clone();
+                let values_json: Vec<String> = values.iter()
+                    .map(|v| serde_json::to_string(v).unwrap())
+                    .collect();
+                let values_json_str = format!("[{}]", values_json.join(","));
+                
+                // Call reduce function with key and array
+                let result_json = vm.call_function_with_json_args("reduce", vec![
+                    format!("\"{}\"", key_clone),
+                    values_json_str
+                ]).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to call reduce function: {:?}", e)
+                })?;
+                
+                let result_value: serde_json::Value = serde_json::from_str(&result_json)
+                    .unwrap_or_else(|_| serde_json::Value::String(result_json));
+                let result = (key_clone, result_value);
 
-                    // Process all groups in this chunk
-                    for (key, values) in chunk.iter() {
-                        // Convert values to JS array
-                        let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
-                        for (i, v) in values.iter().enumerate() {
-                            let js_val: rquickjs::Value =
-                                ctx.json_parse(serde_json::to_string(v).unwrap()).unwrap();
-                            js_array.set(i, js_val).unwrap();
-                        }
+                if let Some(ref results) = sort_results {
+                    results.lock().unwrap().push(result);
+                } else {
+                    tx_clone.send(result).await.unwrap();
+                }
+            }
+        }
 
-                        // Call reduce for this key
-                        let reduce_result: rquickjs::Value =
-                            reduce_fn.call((key.clone(), js_array)).unwrap();
-                        // Convert to serde_json::Value
-                        let json_str = ctx
-                            .json_stringify(reduce_result)
-                            .unwrap()
-                            .unwrap()
-                            .to_string()
-                            .unwrap();
-                        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // apply sorting if needed
+        if let Some(sort_results) = sort_results {
+            let results = sort_results.into_inner().unwrap();
+            let vm = vm::VM::new().await.expect("Failed to create VM for sorting");
+            vm.eval_script(&code_for_reduce).await.map_err(|e| {
+                anyhow::anyhow!("Failed to evaluate JavaScript script for sorting: {:?}", e)
+            })?;
 
-                        if let Some(ref results) = sort_results {
-                            // Collect for sorting
-                            results.lock().unwrap().push((key.clone(), value));
-                        } else {
-                            // Stream immediately
-                            tx_clone.blocking_send((key.clone(), value)).unwrap();
-                        }
-                    }
-                });
-            });
-
-            // apply sorting if needed
-            if let Some(sort_results) = sort_results {
-                let results = sort_results.into_inner().unwrap();
-                let vm = vm::VM::new().expect("Failed to create VM for sorting");
-                vm.eval(|ctx| {
-                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
-                    let globals = ctx.globals();
-                    let sort_fn: rquickjs::Function = globals
-                        .get("sort")
-                        .or_else(|_| ctx.eval("sort"))
-                        .expect("sort function not found");
-
-                    // Convert results to JavaScript array for sorting
-                    let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
-                    for (i, (key, value)) in results.iter().enumerate() {
-                        let result_pair = rquickjs::Array::new(ctx.clone()).unwrap();
-                        result_pair.set(0, key.clone()).unwrap();
-                        let js_value: rquickjs::Value = ctx
-                            .json_parse(serde_json::to_string(value).unwrap())
-                            .unwrap();
-                        result_pair.set(1, js_value).unwrap();
-                        js_array.set(i, result_pair).unwrap();
-                    }
-
-                    let sorted_array: rquickjs::Value = sort_fn.call((js_array,)).unwrap();
-
-                    // Send sorted results to output thread
-                    if let Some(array) = sorted_array.as_array() {
-                        for i in 0..array.len() {
-                            if let Ok(pair) = array.get::<rquickjs::Value>(i) {
-                                if let Some(pair_array) = pair.as_array() {
-                                    if pair_array.len() >= 2 {
-                                        let key: String = pair_array.get(0).unwrap();
-                                        let value_js: rquickjs::Value = pair_array.get(1).unwrap();
-                                        // Convert to serde_json::Value for output formatting
-                                        let json_str = ctx
-                                            .json_stringify(value_js)
-                                            .unwrap()
-                                            .unwrap()
-                                            .to_string()
-                                            .unwrap();
-                                        let value: serde_json::Value =
-                                            serde_json::from_str(&json_str).unwrap();
-                                        tx_clone.blocking_send((key, value)).unwrap();
-                                    }
-                                }
+            // Convert results to JavaScript array for sorting
+            let results_json: Vec<String> = results.iter()
+                .map(|(key, value)| format!("[\"{}\", {}]", key, serde_json::to_string(value).unwrap()))
+                .collect();
+            let array_str = format!("[{}]", results_json.join(","));
+            
+            let sorted_json = vm.call_function_with_json_args("sort", vec![array_str]).await
+                .map_err(|e| anyhow::anyhow!("Failed to call sort function: {:?}", e))?;
+            
+            // Parse and send sorted results
+            let sorted_array: serde_json::Value = serde_json::from_str(&sorted_json)
+                .map_err(|e| anyhow::anyhow!("Failed to parse sorted results: {:?}", e))?;
+            
+            if let serde_json::Value::Array(arr) = sorted_array {
+                for item in arr {
+                    if let serde_json::Value::Array(pair) = item {
+                        if pair.len() >= 2 {
+                            if let (serde_json::Value::String(key), value) = (&pair[0], &pair[1]) {
+                                tx_clone.send((key.clone(), value.clone())).await.unwrap();
                             }
                         }
                     }
-                });
+                }
             }
+        }
 
-            drop(tx_clone);
-        })
-        .await?;
+        drop(tx_clone);
 
         control_handle.await?;
 
