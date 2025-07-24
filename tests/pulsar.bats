@@ -86,6 +86,39 @@ EOF
   rm -rf "$TMPDIR"
 }
 
+@test "script with async functions" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+async function map(line) {
+  return [[line, parseInt(line) * 2]];
+}
+
+async function reduce(key, values) {
+  return values[0];
+}
+EOF
+
+  # Test with custom script file
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ $(echo "$output" | wc -l) -eq 4 ]]
+  [[ "$output" =~ "0: 0" ]]
+  [[ "$output" =~ "1: 2" ]]
+  [[ "$output" =~ "2: 4" ]]
+  [[ "$output" =~ "3: 6" ]]
+
+  rm -rf "$TMPDIR"
+}
+
 @test "custom script with const and arrow functions" {
   TMPDIR=$(mktemp -d)
   TESTFILE="$TMPDIR/test.txt"
