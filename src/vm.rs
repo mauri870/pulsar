@@ -1,9 +1,10 @@
 use llrt_modules::module_builder::ModuleBuilder;
-use rquickjs::{
-    AsyncContext, AsyncRuntime, Error, FromJs, Function, async_with, function::IntoArgs,
-    promise::MaybePromise,
-};
+use rquickjs::{AsyncContext, AsyncRuntime, Error, Function, async_with, promise::MaybePromise};
 use std::result::Result as StdResult;
+use std::sync::OnceLock;
+
+// Global runtime for use in rayon threads
+static GLOBAL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub struct VM {
     _runtime: AsyncRuntime,
@@ -35,6 +36,16 @@ impl VM {
         })
     }
 
+    // Sync wrapper for VM creation in rayon contexts
+    pub fn new_sync() -> StdResult<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Initialize global runtime if not already done
+        let rt = GLOBAL_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
+        });
+
+        rt.block_on(Self::new())
+    }
+
     pub async fn eval<F, R>(&self, f: F) -> R
     where
         F: FnOnce(rquickjs::Ctx) -> R + Send,
@@ -44,6 +55,18 @@ impl VM {
             f(ctx)
         })
         .await
+    }
+
+    // Sync wrapper for eval
+    pub fn eval_sync<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(rquickjs::Ctx) -> R + Send,
+        R: Send + 'static,
+    {
+        let rt = GLOBAL_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
+        });
+        rt.block_on(self.eval(f))
     }
 
     pub async fn eval_script(&self, script: &str) -> StdResult<(), Error> {
@@ -56,6 +79,26 @@ impl VM {
             Ok::<_, Error>(())
         })
         .await
+    }
+
+    // Sync wrapper for eval_script
+    pub fn eval_script_sync(&self, script: &str) -> StdResult<(), Error> {
+        let rt = GLOBAL_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
+        });
+        rt.block_on(self.eval_script(script))
+    }
+
+    // Sync wrapper that uses global runtime for use in rayon contexts
+    pub fn call_function_with_string_sync(
+        &self,
+        name: &str,
+        arg: String,
+    ) -> StdResult<String, Error> {
+        let rt = GLOBAL_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
+        });
+        rt.block_on(self.call_function_with_string(name, arg))
     }
 
     pub async fn call_function_with_string(
@@ -81,6 +124,18 @@ impl VM {
             Ok::<String, Error>(json_str)
         })
         .await
+    }
+
+    // Sync wrapper for reduce function calls
+    pub fn call_function_with_json_args_sync(
+        &self,
+        name: &str,
+        args: Vec<String>,
+    ) -> StdResult<String, Error> {
+        let rt = GLOBAL_RUNTIME.get_or_init(|| {
+            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
+        });
+        rt.block_on(self.call_function_with_json_args(name, args))
     }
 
     pub async fn call_function_with_json_args(
