@@ -1,14 +1,10 @@
 use llrt_modules::module_builder::ModuleBuilder;
-use rquickjs::{AsyncContext, AsyncRuntime, Error, Function, async_with, promise::MaybePromise};
+use rquickjs::{AsyncContext, AsyncRuntime, Error, Function, async_with, promise::MaybePromise, IntoJs};
 use std::result::Result as StdResult;
-use std::sync::OnceLock;
-
-// Global runtime for use in rayon threads
-static GLOBAL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 pub struct VM {
-    _runtime: AsyncRuntime,
     context: AsyncContext,
+    runtime: AsyncRuntime, // Keep runtime accessible for idle() method
 }
 
 impl VM {
@@ -30,43 +26,7 @@ impl VM {
         })
         .await?;
 
-        Ok(Self {
-            _runtime: runtime,
-            context,
-        })
-    }
-
-    // Sync wrapper for VM creation in rayon contexts
-    pub fn new_sync() -> StdResult<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Initialize global runtime if not already done
-        let rt = GLOBAL_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
-        });
-
-        rt.block_on(Self::new())
-    }
-
-    pub async fn eval<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(rquickjs::Ctx) -> R + Send,
-        R: Send + 'static,
-    {
-        async_with!(self.context => |ctx| {
-            f(ctx)
-        })
-        .await
-    }
-
-    // Sync wrapper for eval
-    pub fn eval_sync<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(rquickjs::Ctx) -> R + Send,
-        R: Send + 'static,
-    {
-        let rt = GLOBAL_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
-        });
-        rt.block_on(self.eval(f))
+        Ok(Self { context, runtime })
     }
 
     pub async fn eval_script(&self, script: &str) -> StdResult<(), Error> {
@@ -81,39 +41,77 @@ impl VM {
         .await
     }
 
-    // Sync wrapper for eval_script
-    pub fn eval_script_sync(&self, script: &str) -> StdResult<(), Error> {
-        let rt = GLOBAL_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
-        });
-        rt.block_on(self.eval_script(script))
+    // Helper method to check if a function exists
+    pub async fn has_function(&self, name: &str) -> bool {
+        async_with!(self.context => |ctx| {
+            let globals = ctx.globals();
+            globals.get(name).map(|_: rquickjs::Function| ()).is_ok()
+                || ctx.eval(name).map(|_: rquickjs::Function| ()).is_ok()
+        })
+        .await
     }
 
-    // Sync wrapper that uses global runtime for use in rayon contexts
-    pub fn call_function_with_string_sync(
-        &self,
-        name: &str,
-        arg: String,
-    ) -> StdResult<String, Error> {
-        let rt = GLOBAL_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
-        });
-        rt.block_on(self.call_function_with_string(name, arg))
+    // Helper method for sorting operations
+    pub async fn sort_results(&self, results: Vec<(String, serde_json::Value)>) -> StdResult<Vec<(String, serde_json::Value)>, Error> {
+        async_with!(self.context => |ctx| {
+            let globals = ctx.globals();
+            let sort_fn: rquickjs::Function = globals
+                .get("sort")
+                .or_else(|_| ctx.eval("sort"))?;
+
+            // Convert results to JavaScript array for sorting
+            let js_array = rquickjs::Array::new(ctx.clone())?;
+            for (i, (key, value)) in results.iter().enumerate() {
+                let result_pair = rquickjs::Array::new(ctx.clone())?;
+                result_pair.set(0, key.clone())?;
+                let js_value: rquickjs::Value = ctx
+                    .json_parse(serde_json::to_string(value).unwrap())?;
+                result_pair.set(1, js_value)?;
+                js_array.set(i, result_pair)?;
+            }
+
+            let sorted_array: rquickjs::Value = sort_fn.call((js_array,))?;
+
+            // Convert back to Rust types
+            let mut sorted_results = Vec::new();
+            if let Some(array) = sorted_array.as_array() {
+                for i in 0..array.len() {
+                    if let Ok(pair) = array.get::<rquickjs::Value>(i) {
+                        if let Some(pair_array) = pair.as_array() {
+                            if pair_array.len() >= 2 {
+                                let key: String = pair_array.get(0)?;
+                                let value_js: rquickjs::Value = pair_array.get(1)?;
+                                let json_str = ctx
+                                    .json_stringify(value_js)?
+                                    .unwrap()
+                                    .to_string()
+                                    .unwrap();
+                                let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                                sorted_results.push((key, value));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok::<Vec<(String, serde_json::Value)>, Error>(sorted_results)
+        })
+        .await
     }
 
-    pub async fn call_function_with_string(
-        &self,
-        name: &str,
-        arg: String,
-    ) -> StdResult<String, Error> {
+    // Unified function call method - handles single arguments
+    pub async fn call_function(&self, name: &str, arg: &str) -> StdResult<String, Error> {
         async_with!(self.context => |ctx| {
             // Get the function
             let globals = ctx.globals();
             let function: Function = globals.get(name)
                 .or_else(|_| ctx.eval(name))?;
 
+            // Convert string directly to JS string (no JSON parsing needed for simple strings)
+            let js_arg = arg.into_js(&ctx)?;
+
             // Call the function and get a MaybePromise
-            let result: MaybePromise = function.call((arg,))?;
+            let result: MaybePromise = function.call((js_arg,))?;
 
             // Convert to future and await, then stringify the result
             let awaited_result: rquickjs::Value = result.into_future().await?;
@@ -126,65 +124,55 @@ impl VM {
         .await
     }
 
-    // Sync wrapper for reduce function calls
-    pub fn call_function_with_json_args_sync(
-        &self,
-        name: &str,
-        args: Vec<String>,
-    ) -> StdResult<String, Error> {
-        let rt = GLOBAL_RUNTIME.get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create global runtime")
-        });
-        rt.block_on(self.call_function_with_json_args(name, args))
-    }
-
-    pub async fn call_function_with_json_args(
-        &self,
-        name: &str,
-        args: Vec<String>,
-    ) -> StdResult<String, Error> {
+    // Unified function call method for two arguments
+    pub async fn call_function_with_two_args(&self, name: &str, arg1: &str, arg2: &str) -> StdResult<String, Error> {
         async_with!(self.context => |ctx| {
             // Get the function
             let globals = ctx.globals();
             let function: Function = globals.get(name)
                 .or_else(|_| ctx.eval(name))?;
 
-            // Parse JSON args into JavaScript values
-            let mut js_args = Vec::new();
-            for arg in args {
-                let js_val: rquickjs::Value = ctx.json_parse(arg)?;
-                js_args.push(js_val);
-            }
+            // Convert arguments - use JSON parsing for complex data
+            let js_arg1 = if arg1.starts_with('[') || arg1.starts_with('{') || arg1.starts_with('"') {
+                ctx.json_parse(arg1)?
+            } else {
+                arg1.into_js(&ctx)?
+            };
+            
+            let js_arg2 = if arg2.starts_with('[') || arg2.starts_with('{') || arg2.starts_with('"') {
+                ctx.json_parse(arg2)?
+            } else {
+                arg2.into_js(&ctx)?
+            };
 
-            // Convert Vec to tuple for call
-            match js_args.len() {
-                0 => {
-                    let result: MaybePromise = function.call(())?;
-                    let awaited_result: rquickjs::Value = result.into_future().await?;
-                    let json_str = ctx.json_stringify(awaited_result)?
-                        .map(|s| s.to_string().unwrap_or_default())
-                        .unwrap_or_default();
-                    Ok(json_str)
-                }
-                1 => {
-                    let result: MaybePromise = function.call((&js_args[0],))?;
-                    let awaited_result: rquickjs::Value = result.into_future().await?;
-                    let json_str = ctx.json_stringify(awaited_result)?
-                        .map(|s| s.to_string().unwrap_or_default())
-                        .unwrap_or_default();
-                    Ok(json_str)
-                }
-                2 => {
-                    let result: MaybePromise = function.call((&js_args[0], &js_args[1]))?;
-                    let awaited_result: rquickjs::Value = result.into_future().await?;
-                    let json_str = ctx.json_stringify(awaited_result)?
-                        .map(|s| s.to_string().unwrap_or_default())
-                        .unwrap_or_default();
-                    Ok(json_str)
-                }
-                _ => Err(Error::Exception)
-            }
+            // Call the function and get a MaybePromise
+            let result: MaybePromise = function.call((js_arg1, js_arg2))?;
+
+            // Convert to future and await, then stringify the result
+            let awaited_result: rquickjs::Value = result.into_future().await?;
+            let json_str = ctx.json_stringify(awaited_result)?
+                .map(|s| s.to_string().unwrap_or_default())
+                .unwrap_or_default();
+
+            Ok::<String, Error>(json_str)
         })
         .await
+    }
+
+    // LLRT-style idle method to wait for all async operations to complete
+    pub async fn idle(&self) -> StdResult<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Add a timeout to prevent indefinite waiting
+        let timeout_future = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.runtime.idle()
+        );
+        
+        match timeout_future.await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                eprintln!("Warning: VM idle timeout reached after 30 seconds");
+                Ok(()) // Don't fail, just warn and continue
+            }
+        }
     }
 }

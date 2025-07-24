@@ -114,42 +114,54 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             line_buf.clear();
         }
 
-        // Map phase
-        let chunk_size = CHUNK_SIZE;
+        // Map phase - use async approach with per-chunk runtimes
+        let chunk_size = 5; // Smaller chunks to balance parallelism with VM overhead
         let script_content = code.clone();
         let map_results: Vec<_> = spawn_blocking(move || {
             lines
                 .par_chunks(chunk_size)
                 .enumerate()
                 .map(|(chunk_idx, chunk)| {
-                    let vm = VM::new_sync().expect("Failed to create VM");
-                    if let Err(e) = vm.eval_script_sync(&script_content) {
-                        eprintln!("Failed to evaluate js script: {:#?}", e);
-                        std::process::exit(1);
-                    }
-
-                    let chunk_results: Vec<String> = chunk
-                        .iter()
-                        .map(|line| {
-                            vm.call_function_with_string_sync("map", line.clone())
-                                .expect("Failed to call map function")
-                        })
-                        .collect();
-
-                    // Parse and collect key-value pairs
-                    let mut pairs = Vec::new();
-                    for result in chunk_results {
-                        // The map function returns an array of [key, value] pairs
-                        match serde_json::from_str::<Vec<(String, serde_json::Value)>>(&result) {
-                            Ok(result_pairs) => {
-                                for (key, value) in result_pairs {
-                                    pairs.push((key, value));
-                                }
-                            }
-                            Err(e) => eprintln!("Failed to parse map result: {} - {}", result, e),
+                    // Create a tokio runtime for this chunk
+                    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+                    
+                    rt.block_on(async {
+                        // Create a new VM instance for this chunk (each gets its own runtime)
+                        let vm = VM::new().await.expect("Failed to create VM");
+                        
+                        // Evaluate the script
+                        if let Err(e) = vm.eval_script(&script_content).await {
+                            eprintln!("Failed to evaluate js script: {:#?}", e);
+                            std::process::exit(1);
                         }
-                    }
-                    (chunk_idx, pairs)
+
+                        let mut chunk_results = Vec::new();
+                        for line in chunk.iter() {
+                            let result = vm.call_function("map", line)
+                                .await
+                                .expect("Failed to call map function");
+                            chunk_results.push(result);
+                        }
+
+                        // Parse and collect key-value pairs
+                        let mut pairs = Vec::new();
+                        for result in chunk_results {
+                            // The map function returns an array of [key, value] pairs
+                            match serde_json::from_str::<Vec<(String, serde_json::Value)>>(&result) {
+                                Ok(result_pairs) => {
+                                    for (key, value) in result_pairs {
+                                        pairs.push((key, value));
+                                    }
+                                }
+                                Err(e) => eprintln!("Failed to parse map result: {} - {}", result, e),
+                            }
+                        }
+
+                        // Wait for all async operations to complete before VM cleanup
+                        let _ = vm.idle().await;
+
+                        (chunk_idx, pairs)
+                    })
                 })
                 .collect()
         })
@@ -243,15 +255,15 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
             // Check if we have a sort function
             let has_sort_function = {
-                let vm = VM::new_sync().expect("Failed to create VM for sort check");
-                let mut has_sort = false;
-                vm.eval_sync(|ctx| {
-                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap_or(());
-                    let globals = ctx.globals();
-                    has_sort = globals.get("sort").map(|_: rquickjs::Function| ()).is_ok()
-                        || ctx.eval("sort").map(|_: rquickjs::Function| ()).is_ok();
-                });
-                has_sort
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+                rt.block_on(async {
+                    let vm = VM::new().await.expect("Failed to create VM for sort check");
+                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
+                    
+                    let has_sort = vm.has_function("sort").await;
+                    let _ = vm.idle().await;
+                    has_sort
+                })
             };
 
             let sort_results = if has_sort_function {
@@ -261,92 +273,65 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             };
 
             groups.par_chunks(CHUNK_SIZE).for_each(|chunk| {
-                let vm = VM::new_sync().expect("Failed to create VM");
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
                 let sync_tx_clone = sync_tx.clone();
-                vm.eval_script_sync(&code_for_reduce)
-                    .expect("Failed to evaluate script");
+                
+                rt.block_on(async {
+                    let vm = VM::new().await.expect("Failed to create VM");
+                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
 
-                // Process all groups in this chunk
-                for (key, values) in chunk.iter() {
-                    // Call reduce for this key using async-aware method
-                    let values_json: Vec<String> = values
-                        .iter()
-                        .map(|v| {
-                            // If the value is already a string, don't double-encode it
-                            match v {
-                                serde_json::Value::String(s) => format!("\"{}\"", s),
-                                _ => serde_json::to_string(v).unwrap(),
-                            }
-                        })
-                        .collect();
-                    let args = vec![
-                        serde_json::to_string(&key).unwrap(),
-                        format!("[{}]", values_json.join(",")),
-                    ];
-                    let result_json = vm
-                        .call_function_with_json_args_sync("reduce", args)
-                        .unwrap();
-                    let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+                    // Process all groups in this chunk
+                    for (key, values) in chunk.iter() {
+                        // Call reduce for this key using unified method
+                        let values_json: Vec<String> = values
+                            .iter()
+                            .map(|v| {
+                                // If the value is already a string, don't double-encode it
+                                match v {
+                                    serde_json::Value::String(s) => format!("\"{}\"", s),
+                                    _ => serde_json::to_string(v).unwrap(),
+                                }
+                            })
+                            .collect();
+                        let key_json = serde_json::to_string(&key).unwrap();
+                        let values_array = format!("[{}]", values_json.join(","));
+                        let result_json = vm
+                            .call_function_with_two_args("reduce", &key_json, &values_array)
+                            .await
+                            .unwrap();
+                        let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
 
-                    if let Some(ref results) = sort_results {
-                        // Collect for sorting
-                        results.lock().unwrap().push((key.clone(), value));
-                    } else {
-                        // Stream immediately
-                        sync_tx_clone.send((key.clone(), value)).unwrap();
+                        if let Some(ref results) = sort_results {
+                            // Collect for sorting
+                            results.lock().unwrap().push((key.clone(), value));
+                        } else {
+                            // Stream immediately
+                            sync_tx_clone.send((key.clone(), value)).unwrap();
+                        }
                     }
-                }
+                    
+                    // Wait for VM cleanup
+                    let _ = vm.idle().await;
+                });
             });
 
             // apply sorting if needed
             if let Some(sort_results) = sort_results {
                 let results = sort_results.into_inner().unwrap();
-                let vm = VM::new_sync().expect("Failed to create VM for sorting");
-                vm.eval_sync(|ctx| {
-                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
-                    let globals = ctx.globals();
-                    let sort_fn: rquickjs::Function = globals
-                        .get("sort")
-                        .or_else(|_| ctx.eval("sort"))
-                        .expect("sort function not found");
-
-                    // Convert results to JavaScript array for sorting
-                    let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
-                    for (i, (key, value)) in results.iter().enumerate() {
-                        let result_pair = rquickjs::Array::new(ctx.clone()).unwrap();
-                        result_pair.set(0, key.clone()).unwrap();
-                        let js_value: rquickjs::Value = ctx
-                            .json_parse(serde_json::to_string(value).unwrap())
-                            .unwrap();
-                        result_pair.set(1, js_value).unwrap();
-                        js_array.set(i, result_pair).unwrap();
-                    }
-
-                    let sorted_array: rquickjs::Value = sort_fn.call((js_array,)).unwrap();
-
+                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+                
+                rt.block_on(async {
+                    let vm = VM::new().await.expect("Failed to create VM for sorting");
+                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
+                    
+                    let sorted_results = vm.sort_results(results).await.expect("Failed to sort results");
+                    
                     // Send sorted results to output thread
-                    if let Some(array) = sorted_array.as_array() {
-                        for i in 0..array.len() {
-                            if let Ok(pair) = array.get::<rquickjs::Value>(i) {
-                                if let Some(pair_array) = pair.as_array() {
-                                    if pair_array.len() >= 2 {
-                                        let key: String = pair_array.get(0).unwrap();
-                                        let value_js: rquickjs::Value = pair_array.get(1).unwrap();
-                                        // Convert to serde_json::Value for output formatting
-                                        let json_str = ctx
-                                            .json_stringify(value_js)
-                                            .unwrap()
-                                            .unwrap()
-                                            .to_string()
-                                            .unwrap();
-                                        let value: serde_json::Value =
-                                            serde_json::from_str(&json_str).unwrap();
-                                        sync_tx.send((key, value)).unwrap();
-                                    }
-                                }
-                            }
-                        }
+                    for (key, value) in sorted_results {
+                        sync_tx.send((key, value)).unwrap();
                     }
+                    
+                    let _ = vm.idle().await;
                 });
             }
 
