@@ -2,19 +2,19 @@ mod vm;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use log::{debug};
-use std::fmt::{Debug, Display};
+use log::debug;
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::io::{self, Write};
 use std::sync::Mutex;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
 use tokio::signal;
-use rayon::prelude::*;
+use tokio::sync::mpsc;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
-const CHUNK_SIZE: usize = 128;
+const CHUNK_SIZE: usize = 1024;
 
 #[derive(Debug, Error)]
 pub enum PulsarError {
@@ -65,26 +65,33 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Create a new Pulsar instance from CLI arguments
     pub async fn from_cli(cli: Cli) -> Result<Self> {
-        let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = if cli.input_file == "-" {
-            // Read from stdin
-            let stdin = tokio::io::stdin();
-            BufReader::new(Box::new(stdin))
-        } else {
-            // Read from file
-            let file = tokio::fs::File::open(&cli.input_file).await
-                .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", cli.input_file, e))?;
-            BufReader::new(Box::new(file))
-        };
+        let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
+            if cli.input_file == "-" {
+                // Read from stdin
+                let stdin = tokio::io::stdin();
+                BufReader::new(Box::new(stdin))
+            } else {
+                // Read from file
+                let file = tokio::fs::File::open(&cli.input_file).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to open file {}: {}", cli.input_file, e)
+                })?;
+                BufReader::new(Box::new(file))
+            };
 
         let script = if let Some(script_file) = cli.script_file {
             // Read custom script from file
-            tokio::fs::read_to_string(&script_file).await
+            tokio::fs::read_to_string(&script_file)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", script_file, e))?
         } else {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
-        Ok(Pulsar { reader, script, output_format: cli.output_format })
+        Ok(Pulsar {
+            reader,
+            script,
+            output_format: cli.output_format,
+        })
     }
 
     /// Run the application
@@ -155,7 +162,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         for (key, value) in all_pairs {
             groups_map.entry(key).or_insert_with(Vec::new).push(value);
         }
-        
+
         let groups: Vec<(String, Vec<serde_json::Value>)> = groups_map.into_iter().collect();
 
         // reduce phase - unified approach with chunked VMs
@@ -214,7 +221,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // Unified reduce processing with chunked VMs
         let tx_clone = tx.clone();
         drop(tx); // Drop original to ensure proper channel closure
-        
+
         tokio::task::spawn_blocking(move || {
             // Check if we have a sort function
             let has_sort_function = {
@@ -223,50 +230,60 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 vm.eval(|ctx| {
                     let _: () = ctx.eval(code_for_reduce.as_str()).unwrap_or(());
                     let globals = ctx.globals();
-                    has_sort = globals.get("sort").map(|_: rquickjs::Function| ()).is_ok() ||
-                              ctx.eval("sort").map(|_: rquickjs::Function| ()).is_ok();
+                    has_sort = globals.get("sort").map(|_: rquickjs::Function| ()).is_ok()
+                        || ctx.eval("sort").map(|_: rquickjs::Function| ()).is_ok();
                 });
                 has_sort
             };
 
-            let sort_results = if has_sort_function { Some(Mutex::new(Vec::new())) } else { None };
+            let sort_results = if has_sort_function {
+                Some(Mutex::new(Vec::new()))
+            } else {
+                None
+            };
 
-            groups
-                .par_chunks(CHUNK_SIZE)
-                .for_each(|chunk| {
-                    let vm = vm::VM::new().expect("Failed to create VM");
-                    vm.eval(|ctx| {
-                        let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
-                        let globals = ctx.globals();
-                        let reduce_fn: rquickjs::Function = globals.get("reduce")
-                            .or_else(|_| ctx.eval("reduce"))
-                            .expect("reduce function not found");
+            groups.par_chunks(CHUNK_SIZE).for_each(|chunk| {
+                let vm = vm::VM::new().expect("Failed to create VM");
+                vm.eval(|ctx| {
+                    let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
+                    let globals = ctx.globals();
+                    let reduce_fn: rquickjs::Function = globals
+                        .get("reduce")
+                        .or_else(|_| ctx.eval("reduce"))
+                        .expect("reduce function not found");
 
-                        // Process all groups in this chunk
-                        for (key, values) in chunk.iter() {
-                            // Convert values to JS array
-                            let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
-                            for (i, v) in values.iter().enumerate() {
-                                let js_val: rquickjs::Value = ctx.json_parse(serde_json::to_string(v).unwrap()).unwrap();
-                                js_array.set(i, js_val).unwrap();
-                            }
-
-                            // Call reduce for this key
-                            let reduce_result: rquickjs::Value = reduce_fn.call((key.clone(), js_array)).unwrap();
-                            // Convert to serde_json::Value
-                            let json_str = ctx.json_stringify(reduce_result).unwrap().unwrap().to_string().unwrap();
-                            let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-                            if let Some(ref results) = sort_results {
-                                // Collect for sorting
-                                results.lock().unwrap().push((key.clone(), value));
-                            } else {
-                                // Stream immediately
-                                tx_clone.blocking_send((key.clone(), value)).unwrap();
-                            }
+                    // Process all groups in this chunk
+                    for (key, values) in chunk.iter() {
+                        // Convert values to JS array
+                        let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
+                        for (i, v) in values.iter().enumerate() {
+                            let js_val: rquickjs::Value =
+                                ctx.json_parse(serde_json::to_string(v).unwrap()).unwrap();
+                            js_array.set(i, js_val).unwrap();
                         }
-                    });
+
+                        // Call reduce for this key
+                        let reduce_result: rquickjs::Value =
+                            reduce_fn.call((key.clone(), js_array)).unwrap();
+                        // Convert to serde_json::Value
+                        let json_str = ctx
+                            .json_stringify(reduce_result)
+                            .unwrap()
+                            .unwrap()
+                            .to_string()
+                            .unwrap();
+                        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+                        if let Some(ref results) = sort_results {
+                            // Collect for sorting
+                            results.lock().unwrap().push((key.clone(), value));
+                        } else {
+                            // Stream immediately
+                            tx_clone.blocking_send((key.clone(), value)).unwrap();
+                        }
+                    }
                 });
+            });
 
             // apply sorting if needed
             if let Some(sort_results) = sort_results {
@@ -275,7 +292,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 vm.eval(|ctx| {
                     let _: () = ctx.eval(code_for_reduce.as_str()).unwrap();
                     let globals = ctx.globals();
-                    let sort_fn: rquickjs::Function = globals.get("sort")
+                    let sort_fn: rquickjs::Function = globals
+                        .get("sort")
                         .or_else(|_| ctx.eval("sort"))
                         .expect("sort function not found");
 
@@ -284,7 +302,9 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     for (i, (key, value)) in results.iter().enumerate() {
                         let result_pair = rquickjs::Array::new(ctx.clone()).unwrap();
                         result_pair.set(0, key.clone()).unwrap();
-                        let js_value: rquickjs::Value = ctx.json_parse(serde_json::to_string(value).unwrap()).unwrap();
+                        let js_value: rquickjs::Value = ctx
+                            .json_parse(serde_json::to_string(value).unwrap())
+                            .unwrap();
                         result_pair.set(1, js_value).unwrap();
                         js_array.set(i, result_pair).unwrap();
                     }
@@ -300,8 +320,14 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                         let key: String = pair_array.get(0).unwrap();
                                         let value_js: rquickjs::Value = pair_array.get(1).unwrap();
                                         // Convert to serde_json::Value for output formatting
-                                        let json_str = ctx.json_stringify(value_js).unwrap().unwrap().to_string().unwrap();
-                                        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+                                        let json_str = ctx
+                                            .json_stringify(value_js)
+                                            .unwrap()
+                                            .unwrap()
+                                            .to_string()
+                                            .unwrap();
+                                        let value: serde_json::Value =
+                                            serde_json::from_str(&json_str).unwrap();
                                         tx_clone.blocking_send((key, value)).unwrap();
                                     }
                                 }
@@ -312,7 +338,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             }
 
             drop(tx_clone);
-        }).await?;
+        })
+        .await?;
 
         control_handle.await?;
 
