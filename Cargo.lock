@@ -2106,6 +2106,7 @@ dependencies = [
  "log",
  "rayon",
  "rquickjs",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

@@ -1,4 +1,4 @@
-mod vm;
+mod runtime;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -13,8 +13,6 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal;
 use tokio::sync::mpsc;
-use tokio::task::spawn_blocking;
-use vm::VM;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
 const CHUNK_SIZE: usize = 1024;
@@ -63,6 +61,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
     script: String,
     output_format: OutputFormat,
+    runtime: Box<dyn runtime::Runtime + Send + Sync>,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -94,14 +93,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             reader,
             script,
             output_format: cli.output_format,
+            runtime: Box::new(runtime::WordCountRuntime::new()),
         })
     }
 
     /// Run the application
     pub async fn run(mut self) -> Result<()> {
         debug!("Running pulsar");
-        let code = self.script.clone();
-        let code_for_reduce = code.clone();
 
         // Collect all non-empty lines
         let mut lines = Vec::new();
@@ -114,77 +112,51 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             line_buf.clear();
         }
 
-        // Map phase - use async approach with per-chunk runtimes
+        // Map phase - use parallel processing with single runtime instance
         let chunk_size = 5; // Smaller chunks to balance parallelism with VM overhead
-        let script_content = code.clone();
-        let map_results: Vec<_> = spawn_blocking(move || {
-            lines
-                .par_chunks(chunk_size)
-                .enumerate()
-                .map(|(chunk_idx, chunk)| {
-                    // Create a tokio runtime for this chunk
-                    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                    
-                    rt.block_on(async {
-                        // Create a new VM instance for this chunk (each gets its own runtime)
-                        let vm = VM::new().await.expect("Failed to create VM");
-                        
-                        // Evaluate the script
-                        if let Err(e) = vm.eval_script(&script_content).await {
-                            eprintln!("Failed to evaluate js script: {:#?}", e);
-                            std::process::exit(1);
+        let mapped_results = lines
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let mut chunk_results: Vec<Vec<runtime::KeyValue>> = Vec::new();
+
+                for line in chunk.iter() {
+                    // Call the map from the runtime impl
+                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
+                    match self.runtime.map(line, &context) {
+                        Ok(mapped) => chunk_results.push(mapped),
+                        Err(e) => {
+                            eprintln!("Map error for line '{}': {}", line, e);
+                            continue;
                         }
+                    }
+                }
 
-                        let mut chunk_results = Vec::new();
-                        for line in chunk.iter() {
-                            let result = vm.call_function("map", line)
-                                .await
-                                .expect("Failed to call map function");
-                            chunk_results.push(result);
-                        }
+                (chunk_idx, chunk_results)
+            })
+            .collect::<Vec<_>>();
 
-                        // Parse and collect key-value pairs
-                        let mut pairs = Vec::new();
-                        for result in chunk_results {
-                            // The map function returns an array of [key, value] pairs
-                            match serde_json::from_str::<Vec<(String, serde_json::Value)>>(&result) {
-                                Ok(result_pairs) => {
-                                    for (key, value) in result_pairs {
-                                        pairs.push((key, value));
-                                    }
-                                }
-                                Err(e) => eprintln!("Failed to parse map result: {} - {}", result, e),
-                            }
-                        }
-
-                        // Wait for all async operations to complete before VM cleanup
-                        let _ = vm.idle().await;
-
-                        (chunk_idx, pairs)
-                    })
-                })
-                .collect()
-        })
-        .await
-        .expect("Map phase failed");
-
-        // Collect all pairs from chunks
-        let mut all_pairs = Vec::new();
-        for (_, pairs) in map_results {
-            all_pairs.extend(pairs);
-        }
+        // Flatten the results into a single vector of KeyValue pairs
+        let all_pairs: Vec<runtime::KeyValue> = mapped_results
+            .into_iter()
+            .flat_map(|(_, chunk_results)| chunk_results.into_iter())
+            .flatten()
+            .collect();
 
         // group phase
-        let mut groups_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-        for (key, value) in all_pairs {
-            groups_map.entry(key).or_insert_with(Vec::new).push(value);
+        let mut groups_map: HashMap<String, Vec<runtime::Value>> = HashMap::new();
+        for r in all_pairs.iter() {
+            groups_map
+                .entry(r.key.clone())
+                .or_insert_with(Vec::new)
+                .push(r.value.clone());
         }
 
-        let groups: Vec<(String, Vec<serde_json::Value>)> = groups_map.into_iter().collect();
+        let groups: Vec<(String, Vec<runtime::Value>)> = groups_map.into_iter().collect();
 
-        // reduce phase - unified approach with chunked VMs
+        // reduce phase
         let output_format = self.output_format.clone();
-        let (async_tx, mut rx) = mpsc::channel::<(String, serde_json::Value)>(1000);
+        let (async_tx, mut rx) = mpsc::channel::<(String, runtime::Value)>(1000);
 
         let control_handle = tokio::spawn(async move {
             loop {
@@ -195,29 +167,44 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                 match output_format {
                                     OutputFormat::Plain => {
                                         let display_value = match &result {
-                                            serde_json::Value::String(s) => s.clone(),
-                                            serde_json::Value::Number(n) => n.to_string(),
-                                            serde_json::Value::Bool(b) => b.to_string(),
-                                            serde_json::Value::Null => "null".to_string(),
-                                            serde_json::Value::Array(arr) => {
+                                            runtime::Value::String(s) => s.clone(),
+                                            runtime::Value::Int(n) => n.to_string(),
+                                            runtime::Value::Bool(b) => b.to_string(),
+                                            runtime::Value::Null => "null".to_string(),
+                                            runtime::Value::Array(arr) => {
                                                 arr.iter()
                                                     .map(|v| match v {
-                                                        serde_json::Value::String(s) => s.clone(),
-                                                        serde_json::Value::Number(n) => n.to_string(),
-                                                        serde_json::Value::Bool(b) => b.to_string(),
-                                                        serde_json::Value::Null => "null".to_string(),
-                                                        _ => serde_json::to_string(v).unwrap(),
+                                                        runtime::Value::String(s) => s.clone(),
+                                                        runtime::Value::Int(n) => n.to_string(),
+                                                        runtime::Value::Bool(b) => b.to_string(),
+                                                        runtime::Value::Null => "null".to_string(),
+                                                        _ => format!("{:?}", v),
                                                     })
                                                     .collect::<Vec<_>>()
                                                     .join(",")
                                             },
-                                            _ => serde_json::to_string(&result).unwrap(),
                                         };
                                         println!("{}: {}", key, display_value);
                                         io::stdout().flush().unwrap();
                                     }
                                     OutputFormat::Json => {
-                                        println!("{{\"{}\": {}}}", key, serde_json::to_string(&result).unwrap());
+                                        let json_value = match &result {
+                                            runtime::Value::String(s) => serde_json::Value::String(s.clone()),
+                                            runtime::Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+                                            runtime::Value::Bool(b) => serde_json::Value::Bool(*b),
+                                            runtime::Value::Null => serde_json::Value::Null,
+                                            runtime::Value::Array(arr) => {
+                                                let json_arr = arr.iter().map(|v| match v {
+                                                    runtime::Value::String(s) => serde_json::Value::String(s.clone()),
+                                                    runtime::Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+                                                    runtime::Value::Bool(b) => serde_json::Value::Bool(*b),
+                                                    runtime::Value::Null => serde_json::Value::Null,
+                                                    _ => serde_json::Value::String(format!("{:?}", v)),
+                                                }).collect::<Vec<_>>();
+                                                serde_json::Value::Array(json_arr)
+                                            },
+                                        };
+                                        println!("{{\"{}\": {}}}", key, serde_json::to_string(&json_value).unwrap());
                                         io::stdout().flush().unwrap();
                                     }
                                 }
@@ -235,107 +222,87 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             }
         });
 
-        // Unified reduce processing with chunked VMs
-        let async_tx_clone = async_tx.clone();
+        // Unified reduce processing with parallel chunks using single runtime
+        let async_tx_for_sync = async_tx.clone();
         drop(async_tx); // Drop original to ensure proper channel closure
 
         tokio::task::spawn_blocking(move || {
             // Use sync channel within the blocking task
-            let (sync_tx, sync_rx) = sync_mpsc::channel::<(String, serde_json::Value)>();
-
-            // Spawn a task to forward from sync channel to async channel
-            let async_tx_for_forward = async_tx_clone.clone();
-            std::thread::spawn(move || {
-                while let Ok((key, value)) = sync_rx.recv() {
-                    if async_tx_for_forward.blocking_send((key, value)).is_err() {
-                        break; // Channel closed
-                    }
-                }
-            });
+            let (sync_tx, sync_rx) = sync_mpsc::channel::<(String, runtime::Value)>();
 
             // Check if we have a sort function
-            let has_sort_function = {
-                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                rt.block_on(async {
-                    let vm = VM::new().await.expect("Failed to create VM for sort check");
-                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
-                    
-                    let has_sort = vm.has_function("sort").await;
-                    let _ = vm.idle().await;
-                    has_sort
-                })
-            };
+            let has_sort_function = self.runtime.has_sort();
 
             let sort_results = if has_sort_function {
-                Some(Mutex::new(Vec::new()))
+                Some(Mutex::new(Vec::<(String, runtime::Value)>::new()))
             } else {
                 None
             };
 
             groups.par_chunks(CHUNK_SIZE).for_each(|chunk| {
-                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
                 let sync_tx_clone = sync_tx.clone();
-                
-                rt.block_on(async {
-                    let vm = VM::new().await.expect("Failed to create VM");
-                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
 
-                    // Process all groups in this chunk
-                    for (key, values) in chunk.iter() {
-                        // Call reduce for this key using unified method
-                        let values_json: Vec<String> = values
-                            .iter()
-                            .map(|v| {
-                                // If the value is already a string, don't double-encode it
-                                match v {
-                                    serde_json::Value::String(s) => format!("\"{}\"", s),
-                                    _ => serde_json::to_string(v).unwrap(),
-                                }
-                            })
-                            .collect();
-                        let key_json = serde_json::to_string(&key).unwrap();
-                        let values_array = format!("[{}]", values_json.join(","));
-                        let result_json = vm
-                            .call_function_with_two_args("reduce", &key_json, &values_array)
-                            .await
-                            .unwrap();
-                        let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+                // Call runtime.reduce() and collect results or send to sync channel
+                for (key, values) in chunk.iter() {
+                    let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
+                    let key_value = runtime::Value::String(key.clone());
 
-                        if let Some(ref results) = sort_results {
-                            // Collect for sorting
-                            results.lock().unwrap().push((key.clone(), value));
-                        } else {
-                            // Stream immediately
-                            sync_tx_clone.send((key.clone(), value)).unwrap();
+                    match self.runtime.reduce(key_value, values.clone(), &context) {
+                        Ok(reduced_value) => {
+                            if let Some(ref results) = sort_results {
+                                // Collect for sorting
+                                results.lock().unwrap().push((key.clone(), reduced_value));
+                            } else {
+                                // Stream immediately
+                                sync_tx_clone.send((key.clone(), reduced_value)).unwrap();
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Reduce error for key '{}': {}", key, e);
+                            continue;
                         }
                     }
-                    
-                    // Wait for VM cleanup
-                    let _ = vm.idle().await;
-                });
+                }
             });
 
-            // apply sorting if needed
+            // Apply sorting if needed
             if let Some(sort_results) = sort_results {
+                let sort_context = runtime::RuntimeContext::new("sort".to_string());
                 let results = sort_results.into_inner().unwrap();
-                let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-                
-                rt.block_on(async {
-                    let vm = VM::new().await.expect("Failed to create VM for sorting");
-                    vm.eval_script(&code_for_reduce).await.expect("Failed to evaluate script");
-                    
-                    let sorted_results = vm.sort_results(results).await.expect("Failed to sort results");
-                    
-                    // Send sorted results to output thread
-                    for (key, value) in sorted_results {
-                        sync_tx.send((key, value)).unwrap();
+
+                // Convert results to KeyValue pairs for sorting
+                let key_value_pairs: Vec<runtime::KeyValue> = results
+                    .into_iter()
+                    .map(|(key, value)| runtime::KeyValue { key, value })
+                    .collect();
+
+                match self.runtime.sort(key_value_pairs.clone(), &sort_context) {
+                    Ok(sorted_pairs) => {
+                        // Send sorted results to output thread
+                        for kv in sorted_pairs {
+                            sync_tx.send((kv.key, kv.value)).unwrap();
+                        }
                     }
-                    
-                    let _ = vm.idle().await;
-                });
+                    Err(e) => {
+                        eprintln!("Sort error: {}", e);
+                        // Fallback: send unsorted results
+                        for kv in key_value_pairs {
+                            sync_tx.send((kv.key, kv.value)).unwrap();
+                        }
+                    }
+                }
             }
 
             drop(sync_tx);
+
+            // Forward results from sync channel to async channel
+            let rt = tokio::runtime::Handle::current();
+            while let Ok((key, value)) = sync_rx.recv() {
+                let async_tx_clone = async_tx_for_sync.clone();
+                rt.spawn(async move {
+                    let _ = async_tx_clone.send((key, value)).await;
+                });
+            }
         })
         .await?;
 
