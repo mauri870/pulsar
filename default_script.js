@@ -18,5 +18,5 @@ const reduce = async (key, values) => values.length; // count occurrences of eac
 // Receives the full list of [key, value] pairs after reduction.
 // Should return a sorted list. If provided, disables streaming output
 // since all results must be buffered before sorting.
-// const sort = (results) => 
-//     results.sort((a, b) => a[0].localeCompare(b[0])); // Sort alphabetically
+// const sort = async (results) =>
+//     results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically

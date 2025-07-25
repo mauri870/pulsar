@@ -70,17 +70,30 @@ impl Runtime for JavaScriptRuntime {
 
     async fn sort(
         &self,
-        _data: Vec<KeyValue>,
+        data: Vec<KeyValue>,
         _context: &RuntimeContext,
     ) -> Result<Vec<KeyValue>, RuntimeError> {
-        // TODO: Implement JavaScript sort function execution
-        Err(RuntimeError::ExecutionError(
-            "JavaScript sort not implemented".to_string(),
-        ))
+        let vm = Vm::new().await.unwrap();
+
+        vm.ctx
+            .with(|ctx| {
+                let _ = ctx.eval::<(), _>(self.script.as_str()).unwrap();
+            })
+            .await;
+
+        async_with!(vm.ctx => |ctx| {
+            let reduce_fn = ctx.globals().get::<_, Function>("sort").or_else(|_| ctx.eval("sort")).map_err(|e| RuntimeError::ExecutionError(format!("sort function not found: {:?}", e)))?;
+            let promise: Promise = reduce_fn.call((data,)).map_err(|e| RuntimeError::ExecutionError(format!("Failed to call sort function: {:?}", e)))?;
+            promise
+                .into_future()
+                .await
+                .map_err(|e| RuntimeError::ExecutionError(format!("JavaScript error: {:?}", e)))
+        })
+        .await
     }
 
     fn has_sort(&self) -> bool {
-        false // TODO: fix this
+        true
     }
 }
 
@@ -143,5 +156,18 @@ impl<'js> llrt_core::FromJs<'js> for KeyValue {
             ctx,
             "KeyValue must be an array",
         ))
+    }
+}
+
+impl<'js> llrt_core::IntoJs<'js> for KeyValue {
+    fn into_js(self, ctx: &llrt_core::Ctx<'js>) -> rquickjs::Result<llrt_core::Value<'js>> {
+        match self {
+            KeyValue { key, value } => {
+                let js_array = rquickjs::Array::new(ctx.clone()).unwrap();
+                js_array.set(0, key.into_js(ctx)?)?;
+                js_array.set(1, value.into_js(ctx)?)?;
+                Ok(js_array.into())
+            }
+        }
     }
 }
