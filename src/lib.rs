@@ -105,7 +105,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let has_sort_function = shared_runtime.has_sort().await;
 
         // Channel for streaming results from map phase to reduce phase
-        let (map_tx, map_rx) = mpsc::channel::<Vec<runtime::KeyValue>>(1000);
+        let (map_tx, map_rx) = mpsc::channel::<runtime::KeyValue>(1000);
         let (reduce_tx, reduce_rx) = mpsc::channel::<(String, runtime::Value)>(1000);
 
         // Spawn map phase processor
@@ -141,7 +141,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     async fn process_map_phase<R: AsyncBufReadExt + Unpin>(
         mut reader: R,
         runtime: Arc<runtime::JavaScriptRuntime>,
-        map_tx: mpsc::Sender<Vec<runtime::KeyValue>>,
+        map_tx: mpsc::Sender<runtime::KeyValue>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
         let mut tasks = Vec::new();
@@ -161,18 +161,18 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             let runtime_clone = runtime.clone();
             let map_tx_clone = map_tx.clone();
             let semaphore_clone = semaphore.clone();
+            let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                let mut chunk_results = Vec::new();
                 for line in chunk {
-                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
                     match runtime_clone.map(&line, &context).await {
-                        Ok(mapped) => chunk_results.extend(mapped),
+                        Ok(mapped) => {
+                            for kv in mapped {
+                                map_tx_clone.send(kv).await.unwrap();
+                            }
+                        },
                         Err(e) => eprintln!("Map error for line '{}': {}", line, e),
                     }
-                }
-                if !chunk_results.is_empty() {
-                    let _ = map_tx_clone.send(chunk_results).await;
                 }
             });
             tasks.push(task);
@@ -188,7 +188,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Process reduce phase with incremental grouping
     #[instrument(level = "trace", skip(map_rx, runtime, reduce_tx))]
     async fn process_reduce_phase(
-        mut map_rx: mpsc::Receiver<Vec<runtime::KeyValue>>,
+        mut map_rx: mpsc::Receiver<runtime::KeyValue>,
         runtime: Arc<runtime::JavaScriptRuntime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
         has_sort_function: bool,
@@ -196,13 +196,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let mut groups_map: HashMap<String, Vec<runtime::Value>> = HashMap::new();
 
         // Collect all mapped results into groups
-        while let Some(chunk_results) = map_rx.recv().await {
-            for kv in chunk_results {
-                groups_map
-                    .entry(kv.key)
-                    .or_insert_with(Vec::new)
-                    .push(kv.value);
-            }
+        while let Some(kv) = map_rx.recv().await {
+            groups_map
+                .entry(kv.key)
+                .or_insert_with(Vec::new)
+                .push(kv.value);
         }
 
         if has_sort_function {
