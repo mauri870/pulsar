@@ -2,7 +2,7 @@ mod runtime;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use log::debug;
+use tracing::{debug, instrument};
 use runtime::Runtime;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
@@ -63,6 +63,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Create a new Pulsar instance from CLI arguments
+    #[instrument(level = "trace")]
     pub async fn from_cli(cli: Cli) -> Result<Self> {
         let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
             if cli.input_file == "-" {
@@ -94,9 +95,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Run the application with streaming and optimized processing
+    #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
-        debug!("Running pulsar");
-
         // Create a single shared runtime for all phases
         let shared_runtime = Arc::new(
             runtime::JavaScriptRuntime::new(self.script).await?
@@ -137,6 +137,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process map phase with streaming input and limited concurrency
+    #[instrument(level = "trace", skip(reader, runtime, map_tx))]
     async fn process_map_phase<R: AsyncBufReadExt + Unpin>(
         mut reader: R,
         runtime: Arc<runtime::JavaScriptRuntime>,
@@ -218,6 +219,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process reduce phase with incremental grouping
+    #[instrument(level = "trace", skip(map_rx, runtime, reduce_tx))]
     async fn process_reduce_phase(
         mut map_rx: mpsc::Receiver<Vec<runtime::KeyValue>>,
         runtime: Arc<runtime::JavaScriptRuntime>,
@@ -246,6 +248,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process reduce phase with sorting (collect all results first)
+    #[instrument(level = "trace", skip(groups_map, runtime, reduce_tx))]
     async fn process_with_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
         runtime: Arc<runtime::JavaScriptRuntime>,
@@ -305,6 +308,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process reduce phase without sorting (stream results immediately)
+    #[instrument(level = "trace", skip(groups_map, runtime, reduce_tx))]
     async fn process_without_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
         runtime: Arc<runtime::JavaScriptRuntime>,
@@ -345,6 +349,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Handle output formatting and display
+    #[instrument(level = "trace", skip(reduce_rx))]
     async fn handle_output(
         mut reduce_rx: mpsc::Receiver<(String, runtime::Value)>,
         output_format: OutputFormat,

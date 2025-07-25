@@ -1,10 +1,15 @@
 use anyhow::Result;
 use clap::Parser;
-use log::debug;
+use tracing::debug;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    env_logger::init();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ACTIVE)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let cli = pulsar::Cli::parse();
     debug!("Parsed command line arguments: {:?}", cli);
