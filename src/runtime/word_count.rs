@@ -1,4 +1,5 @@
 use super::{KeyValue, Runtime, RuntimeContext, RuntimeError, Value};
+use async_trait::async_trait;
 
 /// A built-in runtime that implements word count
 pub struct WordCountRuntime {}
@@ -9,8 +10,13 @@ impl WordCountRuntime {
     }
 }
 
+#[async_trait]
 impl Runtime for WordCountRuntime {
-    fn map(&self, line: &str, _context: &RuntimeContext) -> Result<Vec<KeyValue>, RuntimeError> {
+    async fn map(
+        &self,
+        line: &str,
+        _context: &RuntimeContext,
+    ) -> Result<Vec<KeyValue>, RuntimeError> {
         let mut results = Vec::new();
 
         let normalized = line
@@ -40,7 +46,7 @@ impl Runtime for WordCountRuntime {
         Ok(results)
     }
 
-    fn reduce(
+    async fn reduce(
         &self,
         _key: Value,
         values: Vec<Value>,
@@ -62,7 +68,7 @@ impl Runtime for WordCountRuntime {
         Ok(Value::Int(total))
     }
 
-    fn sort(
+    async fn sort(
         &self,
         mut results: Vec<KeyValue>,
         _context: &RuntimeContext,

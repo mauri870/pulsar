@@ -1,9 +1,12 @@
+pub mod javascript;
 pub mod word_count;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
+pub use javascript::*;
 pub use word_count::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,18 +41,12 @@ impl RuntimeContext {
 #[derive(Debug)]
 pub enum RuntimeError {
     ExecutionError(String),
-    ScriptError(String),
-    SerializationError(String),
-    InvalidFunction(String),
 }
 
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             RuntimeError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
-            RuntimeError::ScriptError(msg) => write!(f, "Script error: {}", msg),
-            RuntimeError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
-            RuntimeError::InvalidFunction(msg) => write!(f, "Invalid function: {}", msg),
         }
     }
 }
@@ -57,15 +54,20 @@ impl fmt::Display for RuntimeError {
 impl Error for RuntimeError {}
 
 // Runtime defines the interface for a MapReduce implementation
+#[async_trait]
 pub trait Runtime: Send + Sync {
     /// Execute the map function on input data
     /// Takes a single line of input and returns zero or more key-value pairs
-    fn map(&self, line: &str, context: &RuntimeContext) -> Result<Vec<KeyValue>, RuntimeError>;
+    async fn map(
+        &self,
+        line: &str,
+        context: &RuntimeContext,
+    ) -> Result<Vec<KeyValue>, RuntimeError>;
 
     /// Execute the reduce function on grouped data
     /// Takes a key and all values associated with that key
     /// Returns a single aggregated value for the key
-    fn reduce(
+    async fn reduce(
         &self,
         key: Value,
         values: Vec<Value>,
@@ -74,7 +76,7 @@ pub trait Runtime: Send + Sync {
 
     /// Execute custom sorting logic on all results
     /// Takes the full list of key-value pairs after reduction
-    fn sort(
+    async fn sort(
         &self,
         results: Vec<KeyValue>,
         context: &RuntimeContext,
