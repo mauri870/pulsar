@@ -5,8 +5,8 @@ use async_trait::async_trait;
 pub struct WordCountRuntime {}
 
 impl WordCountRuntime {
-    pub fn new() -> Self {
-        Self {}
+    pub async fn new(_script: String) -> Result<Self, RuntimeError> {
+        Ok(Self {})
     }
 }
 
@@ -83,8 +83,3 @@ impl Runtime for WordCountRuntime {
     }
 }
 
-impl Default for WordCountRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
