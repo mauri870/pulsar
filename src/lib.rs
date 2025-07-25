@@ -94,32 +94,30 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Run the application with streaming and optimized processing
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         debug!("Running pulsar");
 
-        // Create a single shared runtime for checking sort function
+        // Create a single shared runtime for all phases
         let shared_runtime = Arc::new(
-            runtime::JavaScriptRuntime::new(self.script.clone())
-                .await
-                .unwrap(),
+            runtime::JavaScriptRuntime::new(self.script).await?
         );
 
         let has_sort_function = shared_runtime.has_sort().await;
 
         // Channel for streaming results from map phase to reduce phase
-        let (map_tx, mut map_rx) = mpsc::channel::<Vec<runtime::KeyValue>>(1000);
-        let (reduce_tx, mut reduce_rx) = mpsc::channel::<(String, runtime::Value)>(1000);
+        let (map_tx, map_rx) = mpsc::channel::<Vec<runtime::KeyValue>>(1000);
+        let (reduce_tx, reduce_rx) = mpsc::channel::<(String, runtime::Value)>(1000);
 
         // Spawn map phase processor
-        let script_clone = self.script.clone();
+        let map_runtime = shared_runtime.clone();
         let map_handle = tokio::spawn(async move {
-            Self::process_map_phase(self.reader, script_clone, map_tx).await
+            Self::process_map_phase(self.reader, map_runtime, map_tx).await
         });
 
         // Spawn reduce phase processor
-        let script_clone = self.script.clone();
+        let reduce_runtime = shared_runtime.clone();
         let reduce_handle = tokio::spawn(async move {
-            Self::process_reduce_phase(map_rx, script_clone, reduce_tx, has_sort_function).await
+            Self::process_reduce_phase(map_rx, reduce_runtime, reduce_tx, has_sort_function).await
         });
 
         // Spawn output handler
@@ -141,7 +139,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Process map phase with streaming input and limited concurrency
     async fn process_map_phase<R: AsyncBufReadExt + Unpin>(
         mut reader: R,
-        script: String,
+        runtime: Arc<runtime::JavaScriptRuntime>,
         map_tx: mpsc::Sender<Vec<runtime::KeyValue>>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
@@ -162,13 +160,23 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         // Process chunk when it reaches CHUNK_SIZE
                         if chunk_lines.len() >= CHUNK_SIZE {
                             let chunk = std::mem::take(&mut chunk_lines);
-                            let task = Self::spawn_map_task(
-                                chunk,
-                                chunk_idx,
-                                script.clone(),
-                                map_tx.clone(),
-                                semaphore.clone(),
-                            );
+                            let runtime_clone = runtime.clone();
+                            let map_tx_clone = map_tx.clone();
+                            let semaphore_clone = semaphore.clone();
+                            let task = tokio::spawn(async move {
+                                let _permit = semaphore_clone.acquire().await.unwrap();
+                                let mut chunk_results = Vec::new();
+                                for line in chunk {
+                                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
+                                    match runtime_clone.map(&line, &context).await {
+                                        Ok(mapped) => chunk_results.extend(mapped),
+                                        Err(e) => eprintln!("Map error for line '{}': {}", line, e),
+                                    }
+                                }
+                                if !chunk_results.is_empty() {
+                                    let _ = map_tx_clone.send(chunk_results).await;
+                                }
+                            });
                             tasks.push(task);
                             chunk_idx += 1;
                         }
@@ -181,70 +189,38 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // Process remaining lines in final chunk
         if !chunk_lines.is_empty() {
-            let task = Self::spawn_map_task(
-                chunk_lines,
-                chunk_idx,
-                script.clone(),
-                map_tx.clone(),
-                semaphore.clone(),
-            );
+            let runtime_clone = runtime.clone();
+            let map_tx_clone = map_tx.clone();
+            let semaphore_clone = semaphore.clone();
+            let task = tokio::spawn(async move {
+                let _permit = semaphore_clone.acquire().await.unwrap();
+                let mut chunk_results = Vec::new();
+                for line in chunk_lines {
+                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
+                    match runtime_clone.map(&line, &context).await {
+                        Ok(mapped) => chunk_results.extend(mapped),
+                        Err(e) => eprintln!("Map error for line '{}': {}", line, e),
+                    }
+                }
+                if !chunk_results.is_empty() {
+                    let _ = map_tx_clone.send(chunk_results).await;
+                }
+            });
             tasks.push(task);
         }
 
         // Wait for all map tasks to complete
         for task in tasks {
-            if let Err(e) = task.await {
-                eprintln!("Map task error: {}", e);
-            }
+            let _ = task.await;
         }
 
         Ok(())
     }
 
-    /// Spawn a single map task with concurrency control
-    fn spawn_map_task(
-        chunk_lines: Vec<String>,
-        chunk_idx: usize,
-        script: String,
-        map_tx: mpsc::Sender<Vec<runtime::KeyValue>>,
-        semaphore: Arc<tokio::sync::Semaphore>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-
-            // Create runtime once per chunk, not per line
-            let runtime = match runtime::JavaScriptRuntime::new(script).await {
-                Ok(rt) => rt,
-                Err(e) => {
-                    eprintln!("Failed to create runtime for chunk {}: {}", chunk_idx, e);
-                    return;
-                }
-            };
-
-            let mut chunk_results = Vec::new();
-
-            // Process all lines in chunk with same runtime
-            for line in chunk_lines {
-                let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
-                match runtime.map(&line, &context).await {
-                    Ok(mapped) => chunk_results.extend(mapped),
-                    Err(e) => eprintln!("Map error for line '{}': {}", line, e),
-                }
-            }
-
-            // Send results if any
-            if !chunk_results.is_empty() {
-                if let Err(e) = map_tx.send(chunk_results).await {
-                    eprintln!("Failed to send map results: {}", e);
-                }
-            }
-        })
-    }
-
     /// Process reduce phase with incremental grouping
     async fn process_reduce_phase(
         mut map_rx: mpsc::Receiver<Vec<runtime::KeyValue>>,
-        script: String,
+        runtime: Arc<runtime::JavaScriptRuntime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
         has_sort_function: bool,
     ) -> Result<()> {
@@ -262,42 +238,41 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         if has_sort_function {
             // Need to collect all results for sorting
-            Self::process_with_sorting(groups_map, script, reduce_tx).await
+            Self::process_with_sorting(groups_map, runtime, reduce_tx).await
         } else {
             // Can stream results immediately
-            Self::process_without_sorting(groups_map, script, reduce_tx).await
+            Self::process_without_sorting(groups_map, runtime, reduce_tx).await
         }
     }
 
     /// Process reduce phase with sorting (collect all results first)
     async fn process_with_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
-        script: String,
+        runtime: Arc<runtime::JavaScriptRuntime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
         let mut reduce_tasks = Vec::new();
 
         for (key, values) in groups_map {
-            let script_clone = script.clone();
+            let runtime_clone = runtime.clone();
             let semaphore_clone = semaphore.clone();
+            let key_clone = key.clone();
+            let values_clone = values.clone();
 
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-
-                let runtime = runtime::JavaScriptRuntime::new(script_clone).await.unwrap();
-                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
-
-                match runtime
-                    .reduce(runtime::Value::String(key.clone()), values, &context)
+                let context = runtime::RuntimeContext::new(format!("reduce-{}", key_clone));
+                match runtime_clone
+                    .reduce(runtime::Value::String(key_clone.clone()), values_clone, &context)
                     .await
                 {
                     Ok(reduced_value) => Some(runtime::KeyValue {
-                        key,
+                        key: key_clone,
                         value: reduced_value,
                     }),
                     Err(e) => {
-                        eprintln!("Reduce error for key '{}': {}", key, e);
+                        eprintln!("Reduce error for key '{}': {}", key_clone, e);
                         None
                     }
                 }
@@ -316,9 +291,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         }
 
         // Apply sorting
-        let runtime = runtime::JavaScriptRuntime::new(script).await.unwrap();
         let sort_context = runtime::RuntimeContext::new("sort".to_string());
-
         match runtime.sort(reduced_results, &sort_context).await {
             Ok(sorted_pairs) => {
                 for kv in sorted_pairs {
@@ -334,7 +307,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Process reduce phase without sorting (stream results immediately)
     async fn process_without_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
-        script: String,
+        runtime: Arc<runtime::JavaScriptRuntime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
@@ -342,23 +315,22 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         for (key, values) in groups_map {
             let reduce_tx_clone = reduce_tx.clone();
-            let script_clone = script.clone();
+            let runtime_clone = runtime.clone();
             let semaphore_clone = semaphore.clone();
+            let key_clone = key.clone();
+            let values_clone = values.clone();
 
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-
-                let runtime = runtime::JavaScriptRuntime::new(script_clone).await.unwrap();
-                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
-
-                match runtime
-                    .reduce(runtime::Value::String(key.clone()), values, &context)
+                let context = runtime::RuntimeContext::new(format!("reduce-{}", key_clone));
+                match runtime_clone
+                    .reduce(runtime::Value::String(key_clone.clone()), values_clone, &context)
                     .await
                 {
                     Ok(reduced_value) => {
-                        let _ = reduce_tx_clone.send((key, reduced_value)).await;
+                        let _ = reduce_tx_clone.send((key_clone, reduced_value)).await;
                     }
-                    Err(e) => eprintln!("Reduce error for key '{}': {}", key, e),
+                    Err(e) => eprintln!("Reduce error for key '{}': {}", key_clone, e),
                 }
             });
             reduce_tasks.push(task);
