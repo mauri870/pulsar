@@ -92,8 +92,24 @@ impl Runtime for JavaScriptRuntime {
         .await
     }
 
-    fn has_sort(&self) -> bool {
-        true
+    async fn has_sort(&self) -> bool {
+        let vm = Vm::new().await.unwrap();
+
+        vm.ctx
+            .with(|ctx| {
+                // Evaluate the script
+                if let Err(e) = ctx.eval::<(), _>(self.script.as_str()) {
+                    eprintln!("Script eval failed: {}", e);
+                    return false;
+                }
+
+                // Check if global 'sort' function exists
+                ctx.globals()
+                    .get::<_, Function>("sort")
+                    .or_else(|_| ctx.eval("sort"))
+                    .is_ok()
+            })
+            .await
     }
 }
 

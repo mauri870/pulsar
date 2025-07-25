@@ -78,7 +78,7 @@ impl Runtime for WordCountRuntime {
         Ok(results)
     }
 
-    fn has_sort(&self) -> bool {
+    async fn has_sort(&self) -> bool {
         true
     }
 }

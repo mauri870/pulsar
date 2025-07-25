@@ -83,5 +83,5 @@ pub trait Runtime: Send + Sync {
     ) -> Result<Vec<KeyValue>, RuntimeError>;
 
     /// Check if the runtime has a sort function available
-    fn has_sort(&self) -> bool;
+    async fn has_sort(&self) -> bool;
 }

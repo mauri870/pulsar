@@ -234,7 +234,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // Check if we have a sort function
         let runtime = Arc::clone(&self.runtime);
-        let has_sort_function = runtime.has_sort();
+        let has_sort_function = runtime.has_sort().await;
 
         if has_sort_function {
             // Collect all reduce results for sorting
