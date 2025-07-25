@@ -7,6 +7,7 @@ use rquickjs::{Function, async_with, prelude::Promise};
 /// This allows executing custom map-reduce scripts written in JavaScript
 pub struct JavaScriptRuntime {
     vm: Vm,
+    has_sort_fn: bool,
 }
 
 impl JavaScriptRuntime {
@@ -19,7 +20,15 @@ impl JavaScriptRuntime {
                 let _ = ctx.eval::<(), _>(script.as_str()).unwrap();
             })
             .await;
-        Ok(Self { vm })
+        let has_sort_fn = async_with!(vm.ctx => |ctx| {
+            // Check if global 'sort' function exists
+            ctx.globals()
+                .get::<_, Function>("sort")
+                    .or_else(|_| ctx.eval("sort"))
+                    .is_ok()
+            })
+            .await;
+        Ok(Self { vm, has_sort_fn })
     }
 }
 
@@ -75,16 +84,7 @@ impl Runtime for JavaScriptRuntime {
     }
 
     async fn has_sort(&self) -> bool {
-        self.vm
-            .ctx
-            .with(|ctx| {
-                // Check if global 'sort' function exists
-                ctx.globals()
-                    .get::<_, Function>("sort")
-                    .or_else(|_| ctx.eval("sort"))
-                    .is_ok()
-            })
-            .await
+       return self.has_sort_fn;
     }
 }
 
