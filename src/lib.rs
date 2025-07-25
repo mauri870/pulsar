@@ -145,58 +145,26 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
         let mut tasks = Vec::new();
-        let mut chunk_lines = Vec::new();
+        let mut lines = Vec::new();
         let mut line_buf = String::new();
-        let mut chunk_idx = 0;
-
-        // Process input line by line, batching into chunks
-        loop {
-            match reader.read_line(&mut line_buf).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    let line = line_buf.trim();
-                    if !line.is_empty() {
-                        chunk_lines.push(line.to_string());
-
-                        // Process chunk when it reaches CHUNK_SIZE
-                        if chunk_lines.len() >= CHUNK_SIZE {
-                            let chunk = std::mem::take(&mut chunk_lines);
-                            let runtime_clone = runtime.clone();
-                            let map_tx_clone = map_tx.clone();
-                            let semaphore_clone = semaphore.clone();
-                            let task = tokio::spawn(async move {
-                                let _permit = semaphore_clone.acquire().await.unwrap();
-                                let mut chunk_results = Vec::new();
-                                for line in chunk {
-                                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
-                                    match runtime_clone.map(&line, &context).await {
-                                        Ok(mapped) => chunk_results.extend(mapped),
-                                        Err(e) => eprintln!("Map error for line '{}': {}", line, e),
-                                    }
-                                }
-                                if !chunk_results.is_empty() {
-                                    let _ = map_tx_clone.send(chunk_results).await;
-                                }
-                            });
-                            tasks.push(task);
-                            chunk_idx += 1;
-                        }
-                    }
-                    line_buf.clear();
-                }
-                Err(e) => return Err(e.into()),
+        while let Ok(n) = reader.read_line(&mut line_buf).await {
+            if n == 0 { break; }
+            let line = line_buf.trim();
+            if !line.is_empty() {
+                lines.push(line.to_string());
             }
+            line_buf.clear();
         }
 
-        // Process remaining lines in final chunk
-        if !chunk_lines.is_empty() {
+        for (chunk_idx, chunk) in lines.chunks(CHUNK_SIZE).enumerate() {
+            let chunk = chunk.to_vec();
             let runtime_clone = runtime.clone();
             let map_tx_clone = map_tx.clone();
             let semaphore_clone = semaphore.clone();
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
                 let mut chunk_results = Vec::new();
-                for line in chunk_lines {
+                for line in chunk {
                     let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
                     match runtime_clone.map(&line, &context).await {
                         Ok(mapped) => chunk_results.extend(mapped),
@@ -210,7 +178,6 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             tasks.push(task);
         }
 
-        // Wait for all map tasks to complete
         for task in tasks {
             let _ = task.await;
         }
