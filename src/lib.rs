@@ -57,7 +57,6 @@ impl Display for OutputFormat {
 
 pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
-    script: String,
     output_format: OutputFormat,
     runtime: Arc<dyn runtime::Runtime + Send + Sync>,
 }
@@ -89,9 +88,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         };
         Ok(Pulsar {
             reader,
-            script,
             output_format: cli.output_format,
-            runtime: Arc::new(runtime::WordCountRuntime::new()),
+            runtime: Arc::new(runtime::JavaScriptRuntime::new(script.clone())?),
         })
     }
 
@@ -235,8 +233,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         });
 
         // Check if we have a sort function
-        let has_sort_function = self.runtime.has_sort();
         let runtime = Arc::clone(&self.runtime);
+        let has_sort_function = runtime.has_sort();
 
         if has_sort_function {
             // Collect all reduce results for sorting
@@ -325,8 +323,6 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
 impl<R: AsyncBufReadExt + Unpin> Debug for Pulsar<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pulsar")
-            .field("script", &self.script)
-            .finish()
+        f.debug_struct("Pulsar").finish()
     }
 }

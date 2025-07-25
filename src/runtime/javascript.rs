@@ -132,9 +132,16 @@ impl<'js> llrt_core::FromJs<'js> for Value {
 
 impl<'js> llrt_core::FromJs<'js> for KeyValue {
     fn from_js(ctx: &llrt_core::Ctx<'js>, value: llrt_core::Value<'js>) -> rquickjs::Result<Self> {
-        Ok(KeyValue {
-            key: "".into(),
-            value: Value::from_js(ctx, value)?,
-        })
+        if value.is_array() {
+            let js_array = value.as_array().unwrap();
+            let key: String = js_array.get(0)?;
+            let value = Value::from_js(ctx, js_array.get(1)?)?;
+            return Ok(KeyValue { key, value });
+        }
+
+        Err(rquickjs::Exception::throw_message(
+            ctx,
+            "KeyValue must be an array",
+        ))
     }
 }
