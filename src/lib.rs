@@ -2,8 +2,7 @@ mod runtime;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use tracing::{debug, instrument};
-use runtime::Runtime;
+use tracing::instrument;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
@@ -119,10 +118,10 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Run the application with streaming and optimized processing
     #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
-        // Create a single shared runtime for all phases
+        // Create a single shared runtime for sorting
         let runtime: Arc<dyn runtime::Runtime + Send + Sync> = match self.runtime {
-            RuntimeType::WC => Arc::new(runtime::WordCountRuntime::new(self.script).await?),
-            RuntimeType::JS => Arc::new(runtime::JavaScriptRuntime::new(self.script).await?),
+            RuntimeType::WC => Arc::new(runtime::WordCountRuntime::new(self.script.clone()).await?),
+            RuntimeType::JS => Arc::new(runtime::JavaScriptRuntime::new(self.script.clone()).await?),
         };
         let shared_runtime = runtime.clone();
 
@@ -134,14 +133,19 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // Spawn map phase processor
         let map_runtime = shared_runtime.clone();
+        let script_map = self.script.clone();
+        let runtime_type_map = self.runtime.clone();
+        let reader = self.reader;
         let map_handle = tokio::spawn(async move {
-            Self::process_map_phase(self.reader, map_runtime, map_tx).await
+            Self::process_map_phase(reader, map_runtime, map_tx, script_map, runtime_type_map).await
         });
 
         // Spawn reduce phase processor
         let reduce_runtime = shared_runtime.clone();
+        let script_reduce = self.script;
+        let runtime_type_reduce = self.runtime;
         let reduce_handle = tokio::spawn(async move {
-            Self::process_reduce_phase(map_rx, reduce_runtime, reduce_tx, has_sort_function).await
+            Self::process_reduce_phase(map_rx, reduce_runtime, reduce_tx, has_sort_function, script_reduce, runtime_type_reduce).await
         });
 
         // Spawn output handler
@@ -161,11 +165,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process map phase with streaming input and limited concurrency
-    #[instrument(level = "trace", skip(reader, runtime, map_tx))]
+    #[instrument(level = "trace", skip(reader, _runtime, map_tx, runtime_type))]
     async fn process_map_phase<R: AsyncBufReadExt + Unpin>(
         mut reader: R,
-        runtime: Arc<dyn runtime::Runtime>,
+        _runtime: Arc<dyn runtime::Runtime>,
         map_tx: mpsc::Sender<runtime::KeyValue>,
+        script: String,
+        runtime_type: RuntimeType,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
         let mut tasks = Vec::new();
@@ -182,19 +188,25 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         for (chunk_idx, chunk) in lines.chunks(CHUNK_SIZE).enumerate() {
             let chunk = chunk.to_vec();
-            let runtime_clone = runtime.clone();
             let map_tx_clone = map_tx.clone();
             let semaphore_clone = semaphore.clone();
-            let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
+            let script = script.clone();
+            let runtime_type = runtime_type.clone();
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
+                // Create a new VM instance for this task
+                let runtime: Box<dyn runtime::Runtime + Send + Sync> = match runtime_type {
+                    RuntimeType::WC => Box::new(runtime::WordCountRuntime::new(script.clone()).await.unwrap()),
+                    RuntimeType::JS => Box::new(runtime::JavaScriptRuntime::new(script.clone()).await.unwrap()),
+                };
                 for line in chunk {
-                    match runtime_clone.map(&line, &context).await {
+                    let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
+                    match runtime.map(&line, &context).await {
                         Ok(mapped) => {
                             for kv in mapped {
                                 map_tx_clone.send(kv).await.unwrap();
                             }
-                        },
+                        }
                         Err(e) => eprintln!("Map error for line '{}': {}", line, e),
                     }
                 }
@@ -210,12 +222,14 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process reduce phase with incremental grouping
-    #[instrument(level = "trace", skip(map_rx, runtime, reduce_tx))]
+    #[instrument(level = "trace", skip(map_rx, reduce_tx, script, runtime, runtime_type))]
     async fn process_reduce_phase(
         mut map_rx: mpsc::Receiver<runtime::KeyValue>,
         runtime: Arc<dyn runtime::Runtime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
         has_sort_function: bool,
+        script: String,
+        runtime_type: RuntimeType,
     ) -> Result<()> {
         let mut groups_map: HashMap<String, Vec<runtime::Value>> = HashMap::new();
 
@@ -232,7 +246,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             Self::process_with_sorting(groups_map, runtime, reduce_tx).await
         } else {
             // Can stream results immediately
-            Self::process_without_sorting(groups_map, runtime, reduce_tx).await
+            Self::process_without_sorting(groups_map, reduce_tx, script, runtime_type).await
         }
     }
 
@@ -297,29 +311,32 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     }
 
     /// Process reduce phase without sorting (stream results immediately)
-    #[instrument(level = "trace", skip(groups_map, runtime, reduce_tx))]
+    #[instrument(level = "trace", skip(groups_map, reduce_tx))]
     async fn process_without_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
-        runtime: Arc<dyn runtime::Runtime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
+        script: String,
+        runtime_type: RuntimeType,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
         let mut reduce_tasks = Vec::new();
 
         for (key, values) in groups_map {
             let reduce_tx_clone = reduce_tx.clone();
-            let runtime_clone = runtime.clone();
             let semaphore_clone = semaphore.clone();
             let key_clone = key.clone();
             let values_clone = values.clone();
-
+            let script = script.clone();
+            let runtime_type = runtime_type.clone();
             let task = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
+                // Create a new VM instance for this task
+                let runtime: Box<dyn runtime::Runtime + Send + Sync> = match runtime_type {
+                    RuntimeType::WC => Box::new(runtime::WordCountRuntime::new(script.clone()).await.unwrap()),
+                    RuntimeType::JS => Box::new(runtime::JavaScriptRuntime::new(script.clone()).await.unwrap()),
+                };
                 let context = runtime::RuntimeContext::new(format!("reduce-{}", key_clone));
-                match runtime_clone
-                    .reduce(runtime::Value::String(key_clone.clone()), values_clone, &context)
-                    .await
-                {
+                match runtime.reduce(runtime::Value::String(key_clone.clone()), values_clone, &context).await {
                     Ok(reduced_value) => {
                         let _ = reduce_tx_clone.send((key_clone, reduced_value)).await;
                     }
