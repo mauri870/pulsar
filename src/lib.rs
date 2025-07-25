@@ -37,6 +37,26 @@ pub struct Cli {
     /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
     #[arg(short = 's', long = "script")]
     script_file: Option<String>,
+
+    /// Runtime to use for processing.
+    #[arg(long = "runtime", default_value_t = RuntimeType::WC)]
+    runtime: RuntimeType,
+}
+
+#[derive(Debug, Clone, ValueEnum, Default)]
+enum RuntimeType {
+    #[default]
+    WC,
+    JS,
+}
+
+impl Display for RuntimeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeType::WC => write!(f, "wc"),
+            RuntimeType::JS => write!(f, "js"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -56,6 +76,7 @@ impl Display for OutputFormat {
 }
 
 pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
+    runtime: RuntimeType,
     reader: R,
     script: String,
     output_format: OutputFormat,
@@ -88,6 +109,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             DEFAULT_SCRIPT.into()
         };
         Ok(Pulsar {
+            runtime: cli.runtime,
             reader,
             script: script.clone(),
             output_format: cli.output_format,
@@ -98,9 +120,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
         // Create a single shared runtime for all phases
-        let shared_runtime = Arc::new(
-            runtime::JavaScriptRuntime::new(self.script).await?
-        );
+        let runtime: Arc<dyn runtime::Runtime + Send + Sync> = match self.runtime {
+            RuntimeType::WC => Arc::new(runtime::WordCountRuntime::new(self.script).await?),
+            RuntimeType::JS => Arc::new(runtime::JavaScriptRuntime::new(self.script).await?),
+        };
+        let shared_runtime = runtime.clone();
 
         let has_sort_function = shared_runtime.has_sort().await;
 
@@ -140,7 +164,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace", skip(reader, runtime, map_tx))]
     async fn process_map_phase<R: AsyncBufReadExt + Unpin>(
         mut reader: R,
-        runtime: Arc<runtime::JavaScriptRuntime>,
+        runtime: Arc<dyn runtime::Runtime>,
         map_tx: mpsc::Sender<runtime::KeyValue>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
@@ -189,7 +213,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace", skip(map_rx, runtime, reduce_tx))]
     async fn process_reduce_phase(
         mut map_rx: mpsc::Receiver<runtime::KeyValue>,
-        runtime: Arc<runtime::JavaScriptRuntime>,
+        runtime: Arc<dyn runtime::Runtime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
         has_sort_function: bool,
     ) -> Result<()> {
@@ -216,7 +240,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace", skip(groups_map, runtime, reduce_tx))]
     async fn process_with_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
-        runtime: Arc<runtime::JavaScriptRuntime>,
+        runtime: Arc<dyn runtime::Runtime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
@@ -276,7 +300,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace", skip(groups_map, runtime, reduce_tx))]
     async fn process_without_sorting(
         groups_map: HashMap<String, Vec<runtime::Value>>,
-        runtime: Arc<runtime::JavaScriptRuntime>,
+        runtime: Arc<dyn runtime::Runtime>,
         reduce_tx: mpsc::Sender<(String, runtime::Value)>,
     ) -> Result<()> {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(num_cpus::get()));
