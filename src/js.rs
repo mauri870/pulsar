@@ -97,6 +97,37 @@ impl<'js> llrt_core::IntoJs<'js> for KeyValue {
     }
 }
 
+impl ToString for Value {
+    fn to_string(&self) -> String {
+        match self {
+            Value::String(s) => s.clone(),
+            Value::Int(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => "null".to_string(),
+            Value::Array(arr) => arr
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+}
+
+impl From<&Value> for serde_json::Value {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::String(s) => serde_json::Value::String(s.clone()),
+            Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Null => serde_json::Value::Null,
+            Value::Array(arr) => {
+                let json_arr = arr.into_iter().map(Into::into).collect();
+                serde_json::Value::Array(json_arr)
+            }
+        }
+    }
+}
+
 pub enum JobRequest {
     Map(String, oneshot::Sender<JobResult>),
     Reduce(String, Vec<Value>, oneshot::Sender<JobResult>),

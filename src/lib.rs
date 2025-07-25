@@ -212,53 +212,20 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     ) {
         match output_format {
             OutputFormat::Plain => {
-                let display_value = Self::value_to_string(result);
                 let _ = writer
-                    .write_all(format!("{}: {}\n", key, display_value).as_bytes())
+                    .write_all(format!("{}: {}\n", key, result.to_string()).as_bytes())
                     .await;
             }
             OutputFormat::Json => {
-                let json_value = Self::value_to_json(result);
+                let val = serde_json::Value::from(result);
                 let _ = writer
-                    .write_all(
-                        format!("{}: {}\n", key, serde_json::to_string(&json_value).unwrap())
-                            .as_bytes(),
-                    )
+                    .write_all(format!("{}\n", serde_json::json!({ key: val })).as_bytes())
                     .await;
             }
         }
 
         // Use tokio's async version of flush
         let _ = tokio::io::stdout().flush().await;
-    }
-
-    /// Convert value to string representation
-    fn value_to_string(value: &js::Value) -> String {
-        match value {
-            js::Value::String(s) => s.clone(),
-            js::Value::Int(n) => n.to_string(),
-            js::Value::Bool(b) => b.to_string(),
-            js::Value::Null => "null".to_string(),
-            js::Value::Array(arr) => arr
-                .iter()
-                .map(Self::value_to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        }
-    }
-
-    /// Convert value to serde_json::Value
-    fn value_to_json(value: &js::Value) -> serde_json::Value {
-        match value {
-            js::Value::String(s) => serde_json::Value::String(s.clone()),
-            js::Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            js::Value::Bool(b) => serde_json::Value::Bool(*b),
-            js::Value::Null => serde_json::Value::Null,
-            js::Value::Array(arr) => {
-                let json_arr = arr.iter().map(Self::value_to_json).collect();
-                serde_json::Value::Array(json_arr)
-            }
-        }
     }
 }
 
