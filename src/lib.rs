@@ -3,6 +3,7 @@ mod runtime;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::debug;
+use runtime::Runtime;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::io::{self, Write};
@@ -57,8 +58,8 @@ impl Display for OutputFormat {
 
 pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
+    script: String,
     output_format: OutputFormat,
-    runtime: Arc<dyn runtime::Runtime + Send + Sync>,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -88,8 +89,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         };
         Ok(Pulsar {
             reader,
+            script: script.clone(),
             output_format: cli.output_format,
-            runtime: Arc::new(runtime::JavaScriptRuntime::new(script.clone())?),
         })
     }
 
@@ -108,21 +109,19 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             line_buf.clear();
         }
 
-        // Map phase - use tokio::spawn for concurrent processing
-        let chunk_size = 5; // Smaller chunks to balance parallelism with VM overhead
+        // Map phase
         let mut map_tasks = Vec::new();
-        let runtime = Arc::clone(&self.runtime);
 
-        for (chunk_idx, chunk) in lines.chunks(chunk_size).enumerate() {
+        for (chunk_idx, chunk) in lines.chunks(CHUNK_SIZE).enumerate() {
             let chunk_lines = chunk.to_vec();
-            let runtime_clone = Arc::clone(&runtime);
+            let script = self.script.clone();
 
             let task = tokio::spawn(async move {
+                let runtime = runtime::JavaScriptRuntime::new(script).await.unwrap();
                 let mut chunk_results: Vec<Vec<runtime::KeyValue>> = Vec::new();
-
                 for line in chunk_lines.iter() {
                     let context = runtime::RuntimeContext::new(format!("chunk-{}", chunk_idx));
-                    match runtime_clone.map(line, &context).await {
+                    match runtime.map(&line, &context).await {
                         Ok(mapped) => chunk_results.push(mapped),
                         Err(e) => {
                             eprintln!("Map error for line '{}': {}", line, e);
@@ -167,6 +166,94 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // Reduce phase - use tokio::spawn for concurrent processing
         let output_format = self.output_format.clone();
         let (async_tx, mut rx) = mpsc::channel::<(String, runtime::Value)>(1000);
+
+        // Check if we have a sort function
+        let runtime = runtime::JavaScriptRuntime::new(self.script.clone())
+            .await
+            .unwrap();
+        let has_sort_function = runtime.has_sort().await;
+
+        if has_sort_function {
+            // Collect all reduce results for sorting
+            let mut reduce_tasks = Vec::new();
+
+            for (key, values) in groups {
+                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
+                let runtime = runtime::JavaScriptRuntime::new(self.script.clone())
+                    .await
+                    .unwrap();
+                let task = tokio::spawn(async move {
+                    match runtime
+                        .reduce(runtime::Value::String(key.clone()), values, &context)
+                        .await
+                    {
+                        Ok(reduced_value) => Some((key, reduced_value)),
+                        Err(e) => {
+                            eprintln!("Reduce error for key '{}': {}", key, e);
+                            None
+                        }
+                    }
+                });
+                reduce_tasks.push(task);
+            }
+
+            // Wait for all reduce tasks and collect results
+            let mut reduced_results = Vec::new();
+            for task in reduce_tasks {
+                match task.await {
+                    Ok(Some((key, value))) => {
+                        reduced_results.push(runtime::KeyValue { key, value })
+                    }
+                    Ok(None) => {} // Error case, already logged
+                    Err(e) => eprintln!("Task error: {}", e),
+                }
+            }
+
+            // Apply sorting
+            let sort_context = runtime::RuntimeContext::new("sort".to_string());
+            match runtime.sort(reduced_results, &sort_context).await {
+                Ok(sorted_pairs) => {
+                    // Send sorted results to output
+                    for kv in sorted_pairs {
+                        let _ = async_tx.send((kv.key, kv.value)).await;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Sort error: {}", e);
+                }
+            }
+        } else {
+            // Stream results immediately without sorting
+            let mut reduce_tasks = Vec::new();
+
+            for (key, values) in groups {
+                let async_tx_clone = async_tx.clone();
+                let runtime = runtime::JavaScriptRuntime::new(self.script.clone())
+                    .await
+                    .unwrap();
+                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
+
+                let task = tokio::spawn(async move {
+                    match runtime
+                        .reduce(runtime::Value::String(key.clone()), values, &context)
+                        .await
+                    {
+                        Ok(reduced_value) => {
+                            let _ = async_tx_clone.send((key, reduced_value)).await;
+                        }
+                        Err(e) => {
+                            eprintln!("Reduce error for key '{}': {}", key, e);
+                        }
+                    }
+                });
+                reduce_tasks.push(task);
+            }
+
+            // Wait for all reduce tasks to complete
+            for task in reduce_tasks {
+                let _ = task.await;
+            }
+        }
 
         let control_handle = tokio::spawn(async move {
             loop {
@@ -231,88 +318,6 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 }
             }
         });
-
-        // Check if we have a sort function
-        let runtime = Arc::clone(&self.runtime);
-        let has_sort_function = runtime.has_sort().await;
-
-        if has_sort_function {
-            // Collect all reduce results for sorting
-            let mut reduce_tasks = Vec::new();
-
-            for (key, values) in groups {
-                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
-                let runtime_clone = Arc::clone(&runtime);
-                let task = tokio::spawn(async move {
-                    match runtime_clone
-                        .reduce(runtime::Value::String(key.clone()), values, &context)
-                        .await
-                    {
-                        Ok(reduced_value) => Some((key, reduced_value)),
-                        Err(e) => {
-                            eprintln!("Reduce error for key '{}': {}", key, e);
-                            None
-                        }
-                    }
-                });
-                reduce_tasks.push(task);
-            }
-
-            // Wait for all reduce tasks and collect results
-            let mut reduced_results = Vec::new();
-            for task in reduce_tasks {
-                match task.await {
-                    Ok(Some((key, value))) => {
-                        reduced_results.push(runtime::KeyValue { key, value })
-                    }
-                    Ok(None) => {} // Error case, already logged
-                    Err(e) => eprintln!("Task error: {}", e),
-                }
-            }
-
-            // Apply sorting
-            let sort_context = runtime::RuntimeContext::new("sort".to_string());
-            match runtime.sort(reduced_results, &sort_context).await {
-                Ok(sorted_pairs) => {
-                    // Send sorted results to output
-                    for kv in sorted_pairs {
-                        let _ = async_tx.send((kv.key, kv.value)).await;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Sort error: {}", e);
-                }
-            }
-        } else {
-            // Stream results immediately without sorting
-            let mut reduce_tasks = Vec::new();
-
-            for (key, values) in groups {
-                let async_tx_clone = async_tx.clone();
-                let context = runtime::RuntimeContext::new(format!("reduce-{}", key));
-                let runtime_clone = Arc::clone(&runtime);
-
-                let task = tokio::spawn(async move {
-                    match runtime_clone
-                        .reduce(runtime::Value::String(key.clone()), values, &context)
-                        .await
-                    {
-                        Ok(reduced_value) => {
-                            let _ = async_tx_clone.send((key, reduced_value)).await;
-                        }
-                        Err(e) => {
-                            eprintln!("Reduce error for key '{}': {}", key, e);
-                        }
-                    }
-                });
-                reduce_tasks.push(task);
-            }
-
-            // Wait for all reduce tasks to complete
-            for task in reduce_tasks {
-                let _ = task.await;
-            }
-        }
 
         drop(async_tx);
         control_handle.await?;

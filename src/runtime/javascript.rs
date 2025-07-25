@@ -6,12 +6,21 @@ use rquickjs::{Function, async_with, prelude::Promise};
 /// A JavaScript runtime implementation
 /// This allows executing custom map-reduce scripts written in JavaScript
 pub struct JavaScriptRuntime {
+    vm: Vm,
     script: String,
 }
 
 impl JavaScriptRuntime {
-    pub fn new(script: String) -> Result<Self, RuntimeError> {
-        Ok(Self { script })
+    pub async fn new(script: String) -> Result<Self, RuntimeError> {
+        let vm = Vm::new()
+            .await
+            .map_err(|e| RuntimeError::ExecutionError(format!("Failed to create VM: {:?}", e)))?;
+        vm.ctx
+            .with(|ctx| {
+                let _ = ctx.eval::<(), _>(script.as_str()).unwrap();
+            })
+            .await;
+        Ok(Self { script, vm })
     }
 }
 
@@ -22,17 +31,7 @@ impl Runtime for JavaScriptRuntime {
         line: &str,
         _context: &RuntimeContext,
     ) -> Result<Vec<KeyValue>, RuntimeError> {
-        // Create a new VM for each task
-        let vm = Vm::new().await.unwrap();
-
-        // Evaluate the code
-        vm.ctx
-            .with(|ctx| {
-                let _ = ctx.eval::<(), _>(self.script.as_str()).unwrap();
-            })
-            .await;
-
-        async_with!(vm.ctx => |ctx| {
+        async_with!(self.vm.ctx => |ctx| {
             let map_fn = ctx.globals().get::<_, Function>("map").or_else(|_| ctx.eval("map")).map_err(|e| RuntimeError::ExecutionError(format!("map function not found: {:?}", e)))?;
             let promise: Promise = map_fn.call((line.to_string(),)).map_err(|e| RuntimeError::ExecutionError(format!("Failed to call map function: {:?}", e)))?;
             promise
@@ -49,15 +48,7 @@ impl Runtime for JavaScriptRuntime {
         values: Vec<Value>,
         _context: &RuntimeContext,
     ) -> Result<Value, RuntimeError> {
-        let vm = Vm::new().await.unwrap();
-
-        vm.ctx
-            .with(|ctx| {
-                let _ = ctx.eval::<(), _>(self.script.as_str()).unwrap();
-            })
-            .await;
-
-        async_with!(vm.ctx => |ctx| {
+        async_with!(self.vm.ctx => |ctx| {
             let reduce_fn = ctx.globals().get::<_, Function>("reduce").or_else(|_| ctx.eval("reduce")).map_err(|e| RuntimeError::ExecutionError(format!("reduce function not found: {:?}", e)))?;
             let promise: Promise = reduce_fn.call((key, values)).map_err(|e| RuntimeError::ExecutionError(format!("Failed to call reduce function: {:?}", e)))?;
             promise
@@ -73,15 +64,7 @@ impl Runtime for JavaScriptRuntime {
         data: Vec<KeyValue>,
         _context: &RuntimeContext,
     ) -> Result<Vec<KeyValue>, RuntimeError> {
-        let vm = Vm::new().await.unwrap();
-
-        vm.ctx
-            .with(|ctx| {
-                let _ = ctx.eval::<(), _>(self.script.as_str()).unwrap();
-            })
-            .await;
-
-        async_with!(vm.ctx => |ctx| {
+        async_with!(self.vm.ctx => |ctx| {
             let reduce_fn = ctx.globals().get::<_, Function>("sort").or_else(|_| ctx.eval("sort")).map_err(|e| RuntimeError::ExecutionError(format!("sort function not found: {:?}", e)))?;
             let promise: Promise = reduce_fn.call((data,)).map_err(|e| RuntimeError::ExecutionError(format!("Failed to call sort function: {:?}", e)))?;
             promise
@@ -93,16 +76,9 @@ impl Runtime for JavaScriptRuntime {
     }
 
     async fn has_sort(&self) -> bool {
-        let vm = Vm::new().await.unwrap();
-
-        vm.ctx
+        self.vm
+            .ctx
             .with(|ctx| {
-                // Evaluate the script
-                if let Err(e) = ctx.eval::<(), _>(self.script.as_str()) {
-                    eprintln!("Script eval failed: {}", e);
-                    return false;
-                }
-
                 // Check if global 'sort' function exists
                 ctx.globals()
                     .get::<_, Function>("sort")
