@@ -7,7 +7,6 @@ use rquickjs::{Function, async_with, prelude::Promise};
 /// This allows executing custom map-reduce scripts written in JavaScript
 pub struct JavaScriptRuntime {
     vm: Vm,
-    script: String,
 }
 
 impl JavaScriptRuntime {
@@ -20,7 +19,7 @@ impl JavaScriptRuntime {
                 let _ = ctx.eval::<(), _>(script.as_str()).unwrap();
             })
             .await;
-        Ok(Self { script, vm })
+        Ok(Self { vm })
     }
 }
 

@@ -2297,6 +2297,7 @@ dependencies = [
  "env_logger",
  "llrt_core",
  "log",
+ "num_cpus",
  "rayon",
  "rquickjs",
  "serde",
