@@ -1,8 +1,13 @@
-use llrt_core::vm::Vm;
-use rquickjs::{Function, async_with, prelude::Promise};
+use clap::ValueEnum;
+use llrt_core::{
+    libs::{json, numbers},
+    vm::Vm,
+};
+use rquickjs::{AsyncContext, AsyncRuntime, Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
-use std::thread;
 use std::fmt;
+use std::fmt::Display;
+use std::thread;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
@@ -138,14 +143,17 @@ pub enum JobRequest {
 impl fmt::Debug for JobRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobRequest::Map(input, _) => f.debug_struct("JobRequest::Map")
+            JobRequest::Map(input, _) => f
+                .debug_struct("JobRequest::Map")
                 .field("input", input)
                 .finish(),
-            JobRequest::Reduce(key, values, _) => f.debug_struct("JobRequest::Reduce")
+            JobRequest::Reduce(key, values, _) => f
+                .debug_struct("JobRequest::Reduce")
                 .field("key", key)
                 .field("values", values)
                 .finish(),
-            JobRequest::Sort(results, _) => f.debug_struct("JobRequest::Sort")
+            JobRequest::Sort(results, _) => f
+                .debug_struct("JobRequest::Sort")
                 .field("results", results)
                 .finish(),
         }
@@ -160,16 +168,35 @@ pub enum JobResult {
     Error(String),
 }
 
+#[derive(Default, Debug, Clone, Copy, ValueEnum)]
+pub enum Runtime {
+    #[default]
+    Minimal,
+    Full,
+}
+
+impl Display for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Runtime::Minimal => write!(f, "minimal"),
+            Runtime::Full => write!(f, "full"),
+        }
+    }
+}
+
 #[instrument(level = "trace")]
-pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
+pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>, runtime: Runtime) {
     thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        runtime.block_on(async move {
-            let vm = Vm::new().await.unwrap();
+        rt.block_on(async move {
+            let vm = match runtime {
+                Runtime::Minimal => new_vm_minimal().await.unwrap(),
+                Runtime::Full => Vm::new().await.unwrap(),
+            };
 
             let eval_result = vm
                 .ctx
@@ -186,6 +213,15 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
             let _ = vm.idle().await;
         });
     });
+}
+
+async fn new_vm_minimal() -> Result<Vm, Box<dyn std::error::Error + Send + Sync>> {
+    let runtime = AsyncRuntime::new()?;
+    runtime.set_max_stack_size(512 * 1024).await;
+    runtime.set_gc_threshold(20).await;
+
+    let ctx = AsyncContext::full(&runtime).await?;
+    Ok(Vm { runtime, ctx })
 }
 
 #[instrument(level = "trace", skip(vm))]

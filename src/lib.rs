@@ -39,6 +39,10 @@ pub struct Cli {
     /// Whether to sort the output before printing. Assumes the script has a `sort` function.
     #[arg(long = "sort", action = clap::ArgAction::SetTrue)]
     sort: bool,
+
+    /// JavaScript runtime environment to use.
+    #[arg(long = "runtime", default_value_t = js::Runtime::Minimal)]
+    runtime: js::Runtime,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -62,6 +66,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     script: String,
     sort: bool,
     output_format: OutputFormat,
+    runtime: js::Runtime,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -90,11 +95,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
+
         Ok(Pulsar {
             reader,
             script: script.clone(),
             output_format: cli.output_format,
             sort: cli.sort,
+            runtime: cli.runtime,
         })
     }
 
@@ -108,7 +115,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             workers.push(worker_tx);
 
             // spawn each worker with its own receiver
-            js::start_vm_worker(self.script.clone(), worker_rx);
+            js::start_vm_worker(self.script.clone(), worker_rx, self.runtime);
         }
 
         // for map results
