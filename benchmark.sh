@@ -7,8 +7,15 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+WITH_NODE=0
+for arg in "$@"; do
+  if [[ "$arg" == "--with-node" ]]; then
+    WITH_NODE=1
+  fi
+done
+
 echo ""
-echo "NodeJS version: $(node -v)"
+[[ $WITH_NODE -eq 1 ]] && echo "NodeJS version: $(node -v)"
 echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
 echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name:\s*//') $(lscpu | grep 'CPU(s):' | head -1 | sed 's/CPU(s):\s*//')"
 echo ""
@@ -16,17 +23,21 @@ echo ""
 cat <<EOF
 Summary
 
-This benchmark performs a simple word count on a 20,000-line copy of
-Moby Dick using both NodeJS and Pulsar.
-
-Both versions are asynchronous but, due to the nature of NodeJS,
-it runs on a single thread. Remember, concurrency is not parallelism.
-
-Pulsar, on the other hand, is a highly parallel MapReduce engine and can
-leverage multiple threads.
+This benchmark performs a simple word count aggregation on a 20,000-line
+copy of the Moby Dick by Herman Melville.
 
 Each line is processed by the map function, which introduces an artificial
 delay of approximately 0.23 ms per line, to simulate processing.
+
+EOF
+
+[[ $WITH_NODE -eq 1 ]] && cat <<EOF
+It compares Pulsar against a NodeJS equivalent implementation. Both
+versions are asynchronous but, due to the nature of NodeJS, it runs on a
+single thread. Remember, concurrency is not parallelism.
+
+Pulsar, on the other hand, is a highly parallel MapReduce engine and can
+leverage multiple threads and multiple execution contexts.
 
 EOF
 
@@ -125,21 +136,30 @@ const sort = async (results) =>
     results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically
 EOF
 
+HYPERFINE_ARGS=(
+    --warmup 1
+    --runs 5
+    --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt -s pulsar-script.js'
+    --command-name 'pulsar-20k-lines-sort-by-key-asc' './target/release/pulsar -f input.txt -s pulsar-script.js --sort'
+)
+
+POOP_ARGS=(
+    './target/release/pulsar -f input.txt -s pulsar-script.js'
+)
+
+if [[ $WITH_NODE -eq 1 ]]; then
+    HYPERFINE_ARGS+=( --command-name 'baseline-node-20k-lines' 'node node-script.js input.txt' )
+    POOP_ARGS+=('node node-script.js input.txt')
+fi
+
 # https://github.com/sharkdp/hyperfine
-hyperfine \
-    --warmup 1 \
-    --runs 5 \
-    --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt -s pulsar-script.js' \
-    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt -s pulsar-script.js --sort' \
-    --command-name 'baseline-node-20k-lines' 'node node-script.js input.txt'
+hyperfine "${HYPERFINE_ARGS[@]}"
 
 # https://github.com/andrewrk/poop
 if command -v poop &> /dev/null; then
-    poop \
-        './target/release/pulsar -f input.txt -s pulsar-script.js' \
-        'node node-script.js input.txt'
+    poop "${POOP_ARGS[@]}"
 else
     echo "poop is not installed, skipping..."
 fi
 
-# rm -f node-script.js pulsar-script.js
+rm -f node-script.js pulsar-script.js
