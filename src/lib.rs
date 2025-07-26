@@ -108,7 +108,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Run the application with streaming and optimized processing
     #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
-        let num_workers = num_cpus::get();
+        let num_workers = num_cpus::get().max(1);
         let mut workers = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
             let (worker_tx, worker_rx) = unbounded_channel();
