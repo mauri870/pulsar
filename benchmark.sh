@@ -15,38 +15,67 @@ fi
 
 cargo build --release
 
-# Create AWK script for word counting
-cat > word_count.awk << 'EOF'
-#!/usr/bin/awk -f
+# Equivalent word count script in Node
+cat > word_count.js <<'EOF'
+#!/usr/bin/env node
 
-# Word count script - reads from stdin line by line
-# Converts to lowercase, removes punctuation, splits on whitespace
-# and counts occurrences of each word
+const fs = require('fs');
+const readline = require('readline');
 
-{
-    # Convert line to lowercase
-    line = tolower($0)
-    
-    # Remove punctuation and non-alphanumeric characters (keep only letters, numbers, spaces)
-    gsub(/[^a-z0-9 ]/, " ", line)
-    
-    # Split line into words and count each word
-    n = split(line, words, /[ \t]+/)
-    for (i = 1; i <= n; i++) {
-        word = words[i]
-        if (word != "") {  # Skip empty strings
-            count[word]++
-        }
-    }
+function createReader(inputStream) {
+  return readline.createInterface({
+    input: inputStream,
+    terminal: false,
+  });
 }
 
-END {
-    # Print word counts
-    for (word in count) {
-        print word ": " count[word]
-    }
+function usage() {
+  console.error('Usage: node word_count.js [-f filename]');
+  process.exit(1);
 }
+
+// Parse args
+let inputStream = process.stdin;
+const args = process.argv.slice(2);
+
+if (args.length > 0) {
+  if (args.length !== 2 || args[0] !== '-f') {
+    usage();
+  }
+  const filename = args[1];
+  if (!fs.existsSync(filename)) {
+    console.error(`File not found: ${filename}`);
+    process.exit(1);
+  }
+  inputStream = fs.createReadStream(filename);
+}
+
+const wordCounts = new Map();
+const rl = createReader(inputStream);
+
+rl.on('line', (line) => {
+  const lower = line.toLowerCase();
+  const cleaned = lower.replace(/[^a-z0-9 ]+/g, ' ');
+  const words = cleaned.trim().split(/\s+/);
+
+  for (const word of words) {
+    if (word.length === 0) continue;
+    wordCounts.set(word, (wordCounts.get(word) || 0) + 1);
+  }
+});
+
+rl.on('close', () => {
+  for (const [word, count] of wordCounts) {
+    console.log(`${word}: ${count}`);
+  }
+});
 EOF
+
+echo ""
+echo "NodeJS version: $(node -v)"
+echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
+echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name:\s*//') $(lscpu | grep 'CPU(s):' | head -1 | sed 's/CPU(s):\s*//')"
+echo ""
 
 # https://github.com/sharkdp/hyperfine
 hyperfine \
@@ -54,16 +83,16 @@ hyperfine \
     --runs 10 \
     --export-json benchmark_results.json \
     --export-markdown benchmark_results.md \
-    --command-name 'baseline-awk-20k-lines' 'awk -f word_count.awk input.txt' \
+    --command-name 'baseline-node-20k-lines' 'node word_count.js -f input.txt' \
     --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt > /dev/null' \
     --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt --sort > /dev/null' \
 
 # https://github.com/andrewrk/poop
 if command -v poop &> /dev/null; then
-    poop 'awk -f word_count.awk input.txt' \
+    poop 'node word_count.js -f input.txt' \
          './target/release/pulsar -f input.txt'
 else
     echo "poop is not installed, skipping..."
 fi
 
-rm -f sort_benchmark.js word_count.awk
+rm -f word_count.js

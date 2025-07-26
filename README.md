@@ -125,24 +125,26 @@ EOF
 
 ```txt
 $ ./benchmark.sh 
-   Compiling pulsar v0.1.0 (/home/mauri870/git/mapreduce)
-    Finished `release` profile [optimized] target(s) in 3.64s
-Benchmark 1: baseline-awk-20k-lines
-  Time (mean ± σ):     231.5 ms ±   4.2 ms    [User: 226.9 ms, System: 3.8 ms]
-  Range (min … max):   227.3 ms … 240.0 ms    10 runs
+NodeJS version: v22.16.0
+Pulsar version: pulsar 0.1.0-a79abfd
+CPU: Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz 32
+
+Benchmark 1: baseline-node-20k-lines
+  Time (mean ± σ):     177.8 ms ±   4.1 ms    [User: 220.5 ms, System: 20.4 ms]
+  Range (min … max):   171.1 ms … 183.4 ms    10 runs
  
 Benchmark 2: pulsar-20k-lines
-  Time (mean ± σ):     231.0 ms ±   8.6 ms    [User: 2739.6 ms, System: 271.5 ms]
-  Range (min … max):   218.2 ms … 249.7 ms    10 runs
+  Time (mean ± σ):     222.0 ms ±  11.1 ms    [User: 2756.2 ms, System: 223.1 ms]
+  Range (min … max):   203.3 ms … 242.1 ms    10 runs
  
 Benchmark 3: pulsar-20k-lines-sort
-  Time (mean ± σ):     341.7 ms ±   6.9 ms    [User: 2854.0 ms, System: 291.2 ms]
-  Range (min … max):   332.8 ms … 352.0 ms    10 runs
+  Time (mean ± σ):     339.0 ms ±   8.9 ms    [User: 2857.0 ms, System: 220.5 ms]
+  Range (min … max):   325.4 ms … 351.5 ms    10 runs
  
 Summary
-  pulsar-20k-lines ran
-    1.00 ± 0.04 times faster than baseline-awk-20k-lines
-    1.48 ± 0.06 times faster than pulsar-20k-lines-sort
+  baseline-node-20k-lines ran
+    1.25 ± 0.07 times faster than pulsar-20k-lines
+    1.91 ± 0.07 times faster than pulsar-20k-lines-sort
 ```
 
 ## Tests
