@@ -124,25 +124,25 @@ EOF
 ## Performance
 
 ```txt
-$ ./benchmark.sh
-Finished `release` profile [optimized] target(s) in 0.48s
-    Finished `release` profile [optimized] target(s) in 0.16s
-Benchmark 1: baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines
-  Time (mean ± σ):     147.3 ms ±   1.5 ms    [User: 138.8 ms, System: 10.0 ms]
-  Range (min … max):   145.2 ms … 150.2 ms    10 runs
-
-Benchmark 2: cat input.txt | ./target/release/pulsar > /dev/null
-  Time (mean ± σ):     312.9 ms ±   9.3 ms    [User: 1554.7 ms, System: 354.0 ms]
-  Range (min … max):   296.1 ms … 332.3 ms    10 runs
-
-Benchmark 3: cat input.txt | ./target/release/pulsar --sort > /dev/null
-  Time (mean ± σ):     383.6 ms ±  10.1 ms    [User: 1641.2 ms, System: 349.9 ms]
-  Range (min … max):   361.6 ms … 395.1 ms    10 runs
-
+$ ./benchmark.sh 
+   Compiling pulsar v0.1.0 (/home/mauri870/git/mapreduce)
+    Finished `release` profile [optimized] target(s) in 3.64s
+Benchmark 1: baseline-awk-20k-lines
+  Time (mean ± σ):     231.5 ms ±   4.2 ms    [User: 226.9 ms, System: 3.8 ms]
+  Range (min … max):   227.3 ms … 240.0 ms    10 runs
+ 
+Benchmark 2: pulsar-20k-lines
+  Time (mean ± σ):     231.0 ms ±   8.6 ms    [User: 2739.6 ms, System: 271.5 ms]
+  Range (min … max):   218.2 ms … 249.7 ms    10 runs
+ 
+Benchmark 3: pulsar-20k-lines-sort
+  Time (mean ± σ):     341.7 ms ±   6.9 ms    [User: 2854.0 ms, System: 291.2 ms]
+  Range (min … max):   332.8 ms … 352.0 ms    10 runs
+ 
 Summary
-  baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines ran
-    2.12 ± 0.07 times faster than cat input.txt | ./target/release/pulsar > /dev/null
-    2.60 ± 0.07 times faster than cat input.txt | ./target/release/pulsar --sort > /dev/null
+  pulsar-20k-lines ran
+    1.00 ± 0.04 times faster than baseline-awk-20k-lines
+    1.48 ± 0.06 times faster than pulsar-20k-lines-sort
 ```
 
 ## Tests
