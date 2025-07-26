@@ -149,5 +149,4 @@ Summary
 
 ```bash
 bats tests
-./benchmarks.sh # requires hyperfine
 ```
