@@ -2,6 +2,7 @@ use llrt_core::vm::Vm;
 use rquickjs::{Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
 use std::thread;
+use std::fmt;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
@@ -128,11 +129,27 @@ impl From<&Value> for serde_json::Value {
     }
 }
 
-#[derive(Debug)]
 pub enum JobRequest {
     Map(String, oneshot::Sender<JobResult>),
     Reduce(String, Vec<Value>, oneshot::Sender<JobResult>),
     Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
+}
+
+impl fmt::Debug for JobRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JobRequest::Map(input, _) => f.debug_struct("JobRequest::Map")
+                .field("input", input)
+                .finish(),
+            JobRequest::Reduce(key, values, _) => f.debug_struct("JobRequest::Reduce")
+                .field("key", key)
+                .field("values", values)
+                .finish(),
+            JobRequest::Sort(results, _) => f.debug_struct("JobRequest::Sort")
+                .field("results", results)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
