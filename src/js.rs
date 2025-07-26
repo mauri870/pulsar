@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::thread;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
-use tracing::instrument;
+use tracing::{error, instrument};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
@@ -152,11 +152,14 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
         runtime.block_on(async move {
             let vm = Vm::new().await.unwrap();
 
-            vm.ctx
-                .with(|ctx| {
-                    ctx.eval::<(), _>(js_code).unwrap();
-                })
+            let eval_result = vm
+                .ctx
+                .with(|ctx| ctx.eval::<(), _>(js_code).map_err(|e| e.to_string()))
                 .await;
+            if let Err(e) = eval_result {
+                error!("Error loading JS code: {}", e);
+                return;
+            }
 
             while let Some(job) = rx.recv().await {
                 match job {
