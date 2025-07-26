@@ -49,19 +49,14 @@ END {
 EOF
 
 # https://github.com/sharkdp/hyperfine
-if command -v hhyperfine &> /dev/null; then
-    hyperfine \
-        --warmup 3 \
-        --runs 10 \
-        --export-json benchmark_results.json \
-        --export-markdown benchmark_results.md \
-        'cat input.txt | awk -f word_count.awk' \
-        'cat input.txt | ./target/release/pulsar > /dev/null' \
-        'cat input.txt | ./target/release/pulsar --sort > /dev/null' \
-        --command-name 'baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines'
-else
-    echo "hyperfine is not installed, skipping..."
-fi
+hyperfine \
+    --warmup 3 \
+    --runs 10 \
+    --export-json benchmark_results.json \
+    --export-markdown benchmark_results.md \
+    --command-name 'baseline-awk-20k-lines' 'awk -f word_count.awk input.txt' \
+    --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt > /dev/null' \
+    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt --sort > /dev/null' \
 
 # https://github.com/andrewrk/poop
 if command -v poop &> /dev/null; then
