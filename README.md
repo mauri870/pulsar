@@ -1,10 +1,10 @@
 # pulsar
 
-`pulsar` is a cli tool that provides a high-performance MapReduce engine that processes large datasets using user-defined functions written in JavaScript.
+`pulsar` is a CLI tool that provides a high-performance MapReduce engine for processing large datasets using user-defined JavaScript functions.
 
-Features include parallel processing thanks to rayon, JS scripting with QuickJS, support for streaming output, single or multiple reduce results, ndjson output and optional sorting function (disables output streaming).
+Features include parallel processing powered by Tokio, robust JavaScript support via [AWS's LLRT](https://github.com/awslabs/llrt) engine (based on [QuickJS](https://github.com/DelSkayn/rquickjs)), support for streaming output, NDJSON output, and sorting.
 
-By default, if no script is specified, it performs a simple word count. Check the `default_script.js` for the default behavior and options.
+By default, if no JS script is provided, it performs a simple word count. See default_script.js for the default behavior and available options.
 
 ## Compilation
 

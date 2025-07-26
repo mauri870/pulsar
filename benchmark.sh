@@ -15,12 +15,6 @@ fi
 
 cargo build --release
 
-cat default_script.js > sort_benchmark.js
-cat >> sort_benchmark.js << 'EOF'
-const sort = (results) =>
-    results.sort((a, b) => a[0].localeCompare(b[0]));
-EOF
-
 # Create AWK script for word counting
 cat > word_count.awk << 'EOF'
 #!/usr/bin/awk -f
@@ -61,7 +55,7 @@ hyperfine \
     --export-markdown benchmark_results.md \
     'cat input.txt | awk -f word_count.awk' \
     'cat input.txt | ./target/release/pulsar > /dev/null' \
-    'cat input.txt | ./target/release/pulsar -s sort_benchmark.js > /dev/null' \
-    --command-name 'awk-baseline,pulsar,pulsar-sort'
+    'cat input.txt | ./target/release/pulsar --sort > /dev/null' \
+    --command-name 'baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines'
 
 rm -f sort_benchmark.js word_count.awk
