@@ -46,8 +46,10 @@ sys	  0m0.270s
 
 You could provide a script to ignore stop words and sort the results:
 
-```bash
-cat > script.js << 'EOF'
+<details>
+<summary>script.js</summary>
+
+```js
 const STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in",
   "into", "is", "it", "no", "not", "of", "on", "or", "such", "that", "the",
@@ -59,27 +61,37 @@ const map = async line => line
   .replace(/[^\p{L}\p{N}]+/gu, ' ')
   .trim()
   .split(/\s+/)
-  .filter(word => word && !STOP_WORDS.has(word))
+  .filter(word => 
+    word && 
+    !STOP_WORDS.has(word) &&
+    !/\d/.test(word)    // filter out any word containing digits
+  )
   .map(word => [word, 1]);
 
 const reduce = async (key, values) => values.length;
 
 const sort = async results =>
   results.sort((a, b) => a[0].localeCompare(b[0])); // Sort alphabetically
-EOF
+```
+</details>
 
-./target/release/pulsar -f input.txt -s script.js
+```bash
+$ ./target/release/pulsar -f input.txt -s script.js --sort | head -n5
+aback: 2
+abaft: 2
+abandon: 3
+abandoned: 7
+abandonedly: 1
 ```
 
 ### Log Analysis
 
 Summarize web server logs to count logs per status codes:
 
-```bash
-# generate logs
-docker run --rm mingrammer/flog -n 1000 > /tmp/access.log
+<details>
+<summary>script.js</summary>
 
-cat > script.js << 'EOF'
+```js
 const map = async line => {
   // Parse Apache/Nginx log line example:
   // 127.0.0.1 - - [01/Jan/2023:00:00:01 +0000] "GET /path HTTP/1.1" 200 1234
@@ -94,15 +106,24 @@ const map = async line => {
 
 const reduce = async (key, values) =>
   values.reduce((sum, count) => sum + count, 0);
-EOF
+```
+</details>
 
-./target/release/pulsar -f /tmp/access.log -s script.js
+```bash
+docker run --rm mingrammer/flog -n 1000 >> /tmp/access.log
+$ ./target/release/pulsar -f /tmp/access.log -s script.js
+501: 47
+416: 50
+404: 43
+204: 50
 ```
 
 You could build on this to aggregate local vs internet IPs, then print the results in json:
 
-```bash
-cat > script.js << 'EOF'
+<details>
+<summary>script.js</summary>
+
+```js
 const isLocal = ip => {
   const [a, b] = ip.split('.').map(Number);
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
@@ -116,12 +137,28 @@ const map = async line =>
   });
 
 const reduce = async (key, values) => Array.from(new Set(values)); // deduplicate IPs
-EOF
+```
+</details>
 
-./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
+```bash
+$ ./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
+{
+  "local": [
+    "172.22.38.139",
+    "127.45.14.34",
+  ]
+}
+{
+  "internet": [
+    "237.253.60.152",
+  ]
+}
 ```
 
 ## Performance
+
+<details>
+<summary>perf.txt</summary>
 
 ```txt
 NodeJS version: v22.16.0
@@ -179,6 +216,7 @@ Benchmark 2 (3 runs): node node-script.js input.txt
   cache_misses        433K  ± 43.2K      400K  …  482K           0 ( 0%)          - 15.8% ± 14.8%
   branch_misses      22.4M  ±  320K     22.0M  … 22.6M           0 ( 0%)        ⚡- 23.4% ±  2.3%
 ```
+</details>
 
 ## Tests
 
