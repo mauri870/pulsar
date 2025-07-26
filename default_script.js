@@ -14,9 +14,9 @@ const map = async line => line
 // Should return a aggregated value for the key.
 const reduce = async (key, values) => values.length; // count occurrences of each word
 
-// Sort function:
-// Receives the full list of [key, value] pairs after reduction.
-// Should return a sorted list. If provided, disables streaming output
-// since all results must be buffered before sorting.
-// const sort = async (results) =>
-//     results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically
+// Optional Sort function:
+// Enabled only with --sort. Receives the full list of [key, value] pairs after reduction.
+// Should return a sorted list. If sorting is enabled it disables streaming output
+// since all results must be collected into memory before sorting.
+const sort = async (results) =>
+    results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically

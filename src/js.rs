@@ -131,11 +131,14 @@ impl From<&Value> for serde_json::Value {
 pub enum JobRequest {
     Map(String, oneshot::Sender<JobResult>),
     Reduce(String, Vec<Value>, oneshot::Sender<JobResult>),
+    Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
 }
 
 pub enum JobResult {
     MapSuccess(Vec<KeyValue>),
     ReduceSuccess(Value),
+    SortSuccess(Vec<KeyValue>),
+    Error(String),
 }
 
 #[instrument(level = "trace")]
@@ -159,25 +162,69 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
                 match job {
                     JobRequest::Map(input, respond_to) => {
                         let result = async_with!(vm.ctx => |ctx| {
-                            let map_fn = ctx.globals().get::<_, Function>("map").or_else(|_| ctx.eval("map")).unwrap();
-                            let promise: Promise = map_fn.call((input,)).unwrap();
-                            let output: Vec<KeyValue> = promise.into_future().await.unwrap();
-                            output
+                            let map_fn = ctx.globals()
+                                .get::<_, Function>("map")
+                                .or_else(|_| ctx.eval("map"))
+                                .map_err(|e| format!("map function not found: {:?}", e))?;
+                            let promise: Promise = map_fn
+                                .call((input,))
+                                .map_err(|e| format!("Failed to call map function: {:?}", e))?;
+                            let output: Vec<KeyValue> = promise
+                                .into_future()
+                                .await
+                                .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                            Ok(output)
                         })
                         .await;
 
-                        let _ = respond_to.send(JobResult::MapSuccess(result));
+                        let _ = match result {
+                            Ok(output) => respond_to.send(JobResult::MapSuccess(output)),
+                            Err(e) => respond_to.send(JobResult::Error(e)),
+                        };
                     }
                     JobRequest::Reduce(input, values, respond_to) => {
                         let result = async_with!(vm.ctx => |ctx| {
-                            let reduce_fn = ctx.globals().get::<_, Function>("reduce").or_else(|_| ctx.eval("reduce")).unwrap();
-                            let promise: Promise = reduce_fn.call((input, values)).unwrap();
-                            let output: Value = promise.into_future().await.unwrap();
-                            output
+                            let reduce_fn = ctx.globals()
+                                .get::<_, Function>("reduce")
+                                .or_else(|_| ctx.eval("reduce"))
+                                .map_err(|e| format!("reduce function not found: {:?}", e))?;
+                            let promise: Promise = reduce_fn
+                                .call((input, values))
+                                .map_err(|e| format!("Failed to call reduce function: {:?}", e))?;
+                            let output: Value = promise
+                                .into_future()
+                                .await
+                                .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                            Ok(output)
                         })
                         .await;
 
-                        let _ = respond_to.send(JobResult::ReduceSuccess(result));
+                        let _ = match result {
+                            Ok(output) => respond_to.send(JobResult::ReduceSuccess(output)),
+                            Err(e) => respond_to.send(JobResult::Error(e)),
+                        };
+                    }
+                    JobRequest::Sort(results, respond_to) => {
+                        let result = async_with!(vm.ctx => |ctx| {
+                            let sort_fn = ctx.globals()
+                                .get::<_, Function>("sort")
+                                .or_else(|_| ctx.eval("sort"))
+                                .map_err(|e| format!("sort function not found: {:?}", e))?;
+                            let promise: Promise = sort_fn
+                                .call((results,))
+                                .map_err(|e| format!("Failed to call sort function: {:?}", e))?;
+                            let output: Vec<KeyValue> = promise
+                                .into_future()
+                                .await
+                                .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                            Ok(output)
+                        })
+                        .await;
+
+                        let _ = match result {
+                            Ok(output) => respond_to.send(JobResult::SortSuccess(output)),
+                            Err(e) => respond_to.send(JobResult::Error(e)),
+                        };
                     }
                 }
             }

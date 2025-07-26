@@ -8,7 +8,7 @@ use tokio::{
     sync::{mpsc::unbounded_channel, oneshot},
 };
 use tokio_stream::wrappers::LinesStream;
-use tracing::warn;
+use tracing::error;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -42,6 +42,10 @@ pub struct Cli {
     /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
     #[arg(short = 's', long = "script")]
     script_file: Option<String>,
+
+    /// Whether to sort the output before printing. Assumes the script has a `sort` function.
+    #[arg(long = "sort", action = clap::ArgAction::SetTrue)]
+    sort: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -63,6 +67,7 @@ impl Display for OutputFormat {
 pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
     script: String,
+    sort: bool,
     output_format: OutputFormat,
 }
 
@@ -96,6 +101,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             reader,
             script: script.clone(),
             output_format: cli.output_format,
+            sort: cli.sort,
         })
     }
 
@@ -129,21 +135,19 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    if worker.send(JobRequest::Map(input, resp_tx)).is_err() {
-                        warn!("Failed to send map job");
-                        return;
-                    }
+                    let _ = worker.send(JobRequest::Map(input, resp_tx));
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
                             let _ = map_tx.send(output);
                         }
-                        Ok(_) => {
-                            warn!("Unexpected response from worker");
+                        Ok(JobResult::Error(e)) => {
+                            error!("Error during map: {}", e);
                         }
                         Err(e) => {
-                            warn!("Worker channel error: {}", e);
+                            error!("JS worker error: {}", e);
                         }
+                        _ => unreachable!(),
                     };
                 }
             })
@@ -168,24 +172,19 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    if worker
-                        .send(JobRequest::Reduce(key.clone(), values, resp_tx))
-                        .is_err()
-                    {
-                        warn!("Failed to send reduce job");
-                        return;
-                    }
+                    let _ = worker.send(JobRequest::Reduce(key.clone(), values, resp_tx));
 
                     match resp_rx.await {
                         Ok(JobResult::ReduceSuccess(value)) => {
                             let _ = reduce_tx.send((key, value));
                         }
-                        Ok(_) => {
-                            warn!("Unexpected response from worker");
+                        Ok(JobResult::Error(e)) => {
+                            error!("Error during reduce: {}", e);
                         }
                         Err(e) => {
-                            warn!("Worker channel error: {}", e);
+                            error!("JS worker error: {}", e);
                         }
+                        _ => unreachable!(),
                     };
                 }
             })
@@ -195,8 +194,41 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         drop(reduce_tx);
         let stdout = tokio::io::stdout();
         let mut writer = BufWriter::new(stdout);
-        while let Some((key, value)) = reduce_rx.recv().await {
-            Self::format_and_print_result(&key, &value, &self.output_format, &mut writer).await;
+
+        if self.sort {
+            let mut results = Vec::new();
+            while let Some((key, value)) = reduce_rx.recv().await {
+                results.push(js::KeyValue { key, value });
+            }
+
+            let (resp_tx, resp_rx) = oneshot::channel();
+            let _ = &workers[0].send(JobRequest::Sort(results, resp_tx));
+            match resp_rx.await {
+                Ok(JobResult::SortSuccess(output)) => {
+                    // Write all sorted results
+                    for kv in output {
+                        Self::format_and_print_result(
+                            &kv.key,
+                            &kv.value,
+                            &self.output_format,
+                            &mut writer,
+                        )
+                        .await;
+                    }
+                }
+                Ok(JobResult::Error(e)) => {
+                    error!("Error during sorting: {}", e);
+                }
+                Err(e) => {
+                    error!("JS worker error: {}", e);
+                }
+                _ => unreachable!(),
+            };
+        } else {
+            // Write results as they arrive, no sorting
+            while let Some((key, value)) = reduce_rx.recv().await {
+                Self::format_and_print_result(&key, &value, &self.output_format, &mut writer).await;
+            }
         }
         let _ = writer.flush().await;
 
