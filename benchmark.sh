@@ -145,6 +145,7 @@ HYPERFINE_ARGS=(
 
 POOP_ARGS=(
     './target/release/pulsar -f input.txt -s pulsar-script.js'
+    './target/release/pulsar -f input.txt -s pulsar-script.js --sort'
 )
 
 if [[ $WITH_NODE -eq 1 ]]; then
