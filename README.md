@@ -4,7 +4,7 @@
 
 Features include parallel processing powered by Tokio, robust JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine (based on [QuickJS](https://github.com/DelSkayn/rquickjs)), support for streaming output, NDJSON output, and sorting.
 
-By default, if no JS script is provided, it performs a simple word count. See default_script.js for the default behavior and available options.
+By default, if no JS script is provided, it performs a simple word count. See `default_script.js` for the default behavior and available options.
 
 ## Compilation
 
