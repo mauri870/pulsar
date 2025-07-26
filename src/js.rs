@@ -183,6 +183,7 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
             while let Some(job) = rx.recv().await {
                 handle_job(&vm, job).await;
             }
+            let _ = vm.idle().await;
         });
     });
 }
