@@ -14,17 +14,10 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
-use thiserror::Error;
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
 const MAX_CONCURRENCY: Option<usize> = None;
-
-#[derive(Debug, Error)]
-pub enum PulsarError {
-    #[error("no files or directories to watch")]
-    NoFilesToWatch,
-}
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
