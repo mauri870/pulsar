@@ -129,14 +129,15 @@ EOF
 hyperfine \
     --warmup 1 \
     --runs 5 \
-    --command-name 'baseline-node-20k-lines' 'node node-script.js input.txt' \
     --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt -s pulsar-script.js' \
-    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt -s pulsar-script.js --sort'
+    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt -s pulsar-script.js --sort' \
+    --command-name 'baseline-node-20k-lines' 'node node-script.js input.txt'
 
 # https://github.com/andrewrk/poop
 if command -v poop &> /dev/null; then
-    poop 'node node-script.js input.txt' \
-         './target/release/pulsar -f input.txt -s pulsar-script.js'
+    poop \
+        './target/release/pulsar -f input.txt -s pulsar-script.js' \
+        'node node-script.js input.txt'
 else
     echo "poop is not installed, skipping..."
 fi
