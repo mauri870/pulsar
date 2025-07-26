@@ -155,6 +155,17 @@ $ ./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
 }
 ```
 
+If you want to go further, we can turn this into a simple network server:
+
+```bash
+$ socat TCP-LISTEN:1234,reuseaddr,fork EXEC:"./target/release/pulsar -s script.js --output=json" &
+$ echo "138.97.172.41 - - [26/Jul/2025:17:27:15 +0000] "PATCH /matrix/morph HTTP/1.0" 401 9375" | socat - TCP:localhost:1234
+{"internet":["138.97.172.41"]}
+$ killall socat
+```
+
+Not very efficient, but you get the idea.
+
 ## Performance
 
 <details>
