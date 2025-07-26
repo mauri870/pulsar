@@ -7,6 +7,29 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
+echo ""
+echo "NodeJS version: $(node -v)"
+echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
+echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name:\s*//') $(lscpu | grep 'CPU(s):' | head -1 | sed 's/CPU(s):\s*//')"
+echo ""
+
+cat <<EOF
+Summary
+
+This benchmark performs a simple word count on a 20,000-line copy of
+Moby Dick using both NodeJS and Pulsar.
+
+Both versions are asynchronous but, due to the nature of NodeJS,
+it runs on a single thread. Remember, concurrency is not parallelism.
+
+Pulsar, on the other hand, is a highly parallel MapReduce engine and can
+leverage multiple threads.
+
+Each line is processed by the map function, which introduces an artificial
+delay of approximately 0.23 ms per line, to simulate processing.
+
+EOF
+
 INPUT_FILE="input.txt"
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Input file not found. Downloading Moby Dick from the Gutenberg Project"
@@ -15,10 +38,7 @@ fi
 
 cargo build --release
 
-# Equivalent word count script in Node
-cat > word_count.js <<'EOF'
-#!/usr/bin/env node
-
+cat > node-script.js <<'EOF'
 const fs = require('fs');
 const readline = require('readline');
 
@@ -29,19 +49,11 @@ function createReader(inputStream) {
   });
 }
 
-function usage() {
-  console.error('Usage: node word_count.js [-f filename]');
-  process.exit(1);
-}
-
 // Parse args
 let inputStream = process.stdin;
-const args = process.argv.slice(2);
+const args = process.argv.slice(1);
 
 if (args.length > 0) {
-  if (args.length !== 2 || args[0] !== '-f') {
-    usage();
-  }
   const filename = args[1];
   if (!fs.existsSync(filename)) {
     console.error(`File not found: ${filename}`);
@@ -51,48 +63,82 @@ if (args.length > 0) {
 }
 
 const wordCounts = new Map();
-const rl = createReader(inputStream);
 
-rl.on('line', (line) => {
+async function processLine(line) {
   const lower = line.toLowerCase();
   const cleaned = lower.replace(/[^a-z0-9 ]+/g, ' ');
   const words = cleaned.trim().split(/\s+/);
+
+  // Simulate processing delay once per line
+  await doWork();
 
   for (const word of words) {
     if (word.length === 0) continue;
     wordCounts.set(word, (wordCounts.get(word) || 0) + 1);
   }
-});
+}
 
-rl.on('close', () => {
+const doWork = async () => {
+  const start = performance.now();
+  while ((performance.now() - start) < 0.23) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+(async () => {
+  const rl = createReader(inputStream);
+
+  for await (const line of rl) {
+    await processLine(line);
+  }
+
   for (const [word, count] of wordCounts) {
     console.log(`${word}: ${count}`);
   }
-});
+})();
 EOF
 
-echo ""
-echo "NodeJS version: $(node -v)"
-echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
-echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name:\s*//') $(lscpu | grep 'CPU(s):' | head -1 | sed 's/CPU(s):\s*//')"
-echo ""
+cat > pulsar-script.js <<'EOF'
+const map = async line => {
+  // Simulate processing delay once per line
+  await doWork();
+
+  return line
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ') // keep only letters and numbers
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(word => [word, 1]);
+};
+
+const doWork = async () => {
+  const start = performance.now();
+  while ((performance.now() - start) < 0.23) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+const reduce = async (key, values) => values.length; // count occurrences of each word
+
+const sort = async (results) =>
+    results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically
+EOF
 
 # https://github.com/sharkdp/hyperfine
 hyperfine \
-    --warmup 3 \
-    --runs 10 \
-    --export-json benchmark_results.json \
-    --export-markdown benchmark_results.md \
-    --command-name 'baseline-node-20k-lines' 'node word_count.js -f input.txt' \
-    --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt > /dev/null' \
-    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt --sort > /dev/null' \
+    --warmup 1 \
+    --runs 5 \
+    --command-name 'baseline-node-20k-lines' 'node node-script.js input.txt' \
+    --command-name 'pulsar-20k-lines' './target/release/pulsar -f input.txt -s pulsar-script.js' \
+    --command-name 'pulsar-20k-lines-sort' './target/release/pulsar -f input.txt -s pulsar-script.js --sort'
 
 # https://github.com/andrewrk/poop
 if command -v poop &> /dev/null; then
-    poop 'node word_count.js -f input.txt' \
-         './target/release/pulsar -f input.txt'
+    poop 'node node-script.js input.txt' \
+         './target/release/pulsar -f input.txt -s pulsar-script.js'
 else
     echo "poop is not installed, skipping..."
 fi
 
-rm -f word_count.js
+# rm -f node-script.js pulsar-script.js
