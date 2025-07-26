@@ -121,6 +121,30 @@ EOF
 ./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
 ```
 
+## Performance
+
+```txt
+$ ./benchmark.sh
+Finished `release` profile [optimized] target(s) in 0.48s
+    Finished `release` profile [optimized] target(s) in 0.16s
+Benchmark 1: baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines
+  Time (mean ± σ):     147.3 ms ±   1.5 ms    [User: 138.8 ms, System: 10.0 ms]
+  Range (min … max):   145.2 ms … 150.2 ms    10 runs
+
+Benchmark 2: cat input.txt | ./target/release/pulsar > /dev/null
+  Time (mean ± σ):     312.9 ms ±   9.3 ms    [User: 1554.7 ms, System: 354.0 ms]
+  Range (min … max):   296.1 ms … 332.3 ms    10 runs
+
+Benchmark 3: cat input.txt | ./target/release/pulsar --sort > /dev/null
+  Time (mean ± σ):     383.6 ms ±  10.1 ms    [User: 1641.2 ms, System: 349.9 ms]
+  Range (min … max):   361.6 ms … 395.1 ms    10 runs
+
+Summary
+  baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines ran
+    2.12 ± 0.07 times faster than cat input.txt | ./target/release/pulsar > /dev/null
+    2.60 ± 0.07 times faster than cat input.txt | ./target/release/pulsar --sort > /dev/null
+```
+
 ## Tests
 
 ```bash
