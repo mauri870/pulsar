@@ -48,14 +48,27 @@ END {
 }
 EOF
 
-hyperfine \
-    --warmup 3 \
-    --runs 10 \
-    --export-json benchmark_results.json \
-    --export-markdown benchmark_results.md \
-    'cat input.txt | awk -f word_count.awk' \
-    'cat input.txt | ./target/release/pulsar > /dev/null' \
-    'cat input.txt | ./target/release/pulsar --sort > /dev/null' \
-    --command-name 'baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines'
+# https://github.com/sharkdp/hyperfine
+if command -v hhyperfine &> /dev/null; then
+    hyperfine \
+        --warmup 3 \
+        --runs 10 \
+        --export-json benchmark_results.json \
+        --export-markdown benchmark_results.md \
+        'cat input.txt | awk -f word_count.awk' \
+        'cat input.txt | ./target/release/pulsar > /dev/null' \
+        'cat input.txt | ./target/release/pulsar --sort > /dev/null' \
+        --command-name 'baseline-awk-20k-lines,pulsar-20k-lines,pulsar-sort-20k-lines'
+else
+    echo "hyperfine is not installed, skipping..."
+fi
+
+# https://github.com/andrewrk/poop
+if command -v poop &> /dev/null; then
+    poop 'awk -f word_count.awk input.txt' \
+         './target/release/pulsar -f input.txt'
+else
+    echo "poop is not installed, skipping..."
+fi
 
 rm -f sort_benchmark.js word_count.awk
