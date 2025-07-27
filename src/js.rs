@@ -155,7 +155,9 @@ impl From<&Value> for serde_json::Value {
         match value {
             Value::String(s) => serde_json::Value::String(s.clone()),
             Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-            Value::Float(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap()),
+            Value::Float(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Null => serde_json::Value::Null,
             Value::Array(arr) => {
