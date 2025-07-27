@@ -9,11 +9,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),
     Int(i64),
+    Float(f64),
     String(String),
     Array(Vec<Value>),
     Object(HashMap<String, Value>),
@@ -31,6 +32,7 @@ impl<'js> llrt_core::IntoJs<'js> for Value {
         match self {
             Value::String(s) => s.into_js(ctx),
             Value::Int(i) => i.into_js(ctx),
+            Value::Float(f) => f.into_js(ctx),
             Value::Bool(b) => b.into_js(ctx),
             Value::Null => Ok(rquickjs::Value::new_null(ctx.clone())),
             Value::Array(values) => {
@@ -59,6 +61,8 @@ impl<'js> llrt_core::FromJs<'js> for Value {
             Ok(Value::String(value.as_string().unwrap().to_string()?))
         } else if value.is_int() {
             Ok(Value::Int(value.as_int().unwrap_or(0) as i64))
+        } else if value.is_float() {
+            Ok(Value::Float(value.as_float().unwrap_or(0.0)))
         } else if value.is_bool() {
             Ok(Value::Bool(value.as_bool().unwrap_or(false)))
         } else if value.is_null() {
@@ -84,10 +88,12 @@ impl<'js> llrt_core::FromJs<'js> for Value {
                 })
                 .collect::<Result<HashMap<String, Value>, rquickjs::Error>>()?;
             Ok(Value::Object(map))
+        } else if value.is_undefined() {
+            Ok(Value::Null) // Treat undefined as null
         } else {
             Err(rquickjs::Exception::throw_message(
                 ctx,
-                "Unsupported runtime Value type",
+                &format!("Unsupported JS value type: {:?}", value),
             ))
         }
     }
@@ -127,6 +133,7 @@ impl ToString for Value {
         match self {
             Value::String(s) => s.clone(),
             Value::Int(n) => n.to_string(),
+            Value::Float(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Array(arr) => arr
@@ -148,6 +155,7 @@ impl From<&Value> for serde_json::Value {
         match value {
             Value::String(s) => serde_json::Value::String(s.clone()),
             Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+            Value::Float(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap()),
             Value::Bool(b) => serde_json::Value::Bool(*b),
             Value::Null => serde_json::Value::Null,
             Value::Array(arr) => {
