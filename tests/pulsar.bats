@@ -176,6 +176,42 @@ EOF
   rm -rf "$TMPDIR"
 }
 
+@test "map reduce returning objects" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = async (line) => {
+  const num = parseInt(line);
+  const category = num % 2 === 0 ? "even" : "odd";
+  return [[category, { line }]];
+};
+
+const reduce = async (key, values) => {
+  const sorted = values
+    .map(v => parseInt(v.line))
+    .sort((a, b) => a - b);
+  return { reduction: sorted.join(",") };
+};
+EOF
+
+  # Test with custom script file
+  "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" --output=json > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ $(echo "$output" | wc -l) -eq 2 ]]
+  [[ "$output" =~ '{"even":{"reduction":"0,2"}}' ]]
+  [[ "$output" =~ '{"odd":{"reduction":"1,3"}}' ]]
+
+  rm -rf "$TMPDIR"
+}
+
 @test "map reduce returning strings" {
   TMPDIR=$(mktemp -d)
   TESTFILE="$TMPDIR/test.txt"

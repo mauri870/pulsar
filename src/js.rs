@@ -1,19 +1,22 @@
 use llrt_core::vm::Vm;
+use rquickjs::{CatchResultExt, Coerced};
 use rquickjs::{Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
-use std::thread;
+use std::collections::HashMap;
 use std::fmt;
+use std::thread;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),
     Int(i64),
     String(String),
     Array(Vec<Value>),
+    Object(HashMap<String, Value>),
 }
 
 // Key-value pair for MapReduce operations
@@ -38,6 +41,14 @@ impl<'js> llrt_core::IntoJs<'js> for Value {
                 }
                 Ok(js_array.into())
             }
+            Value::Object(obj) => {
+                let js_object = rquickjs::Object::new(ctx.clone()).unwrap();
+                for (key, value) in obj {
+                    let js_val: rquickjs::Value = value.into_js(ctx)?;
+                    js_object.set(key, js_val)?;
+                }
+                Ok(js_object.into())
+            }
         }
     }
 }
@@ -60,6 +71,19 @@ impl<'js> llrt_core::FromJs<'js> for Value {
                 vec.push(Value::from_js(ctx, item)?);
             }
             Ok(Value::Array(vec))
+        } else if value.is_object() {
+            let object = value.as_object().unwrap();
+            let map: HashMap<String, Value> = object
+                .keys::<llrt_core::Value<'js>>()
+                .map(|key| {
+                    let key = key?;
+                    let key_string: String = Coerced::from_js(ctx, key.clone())?.0;
+                    let value_js = object.get::<_, llrt_core::Value<'js>>(key)?;
+                    let value = Value::from_js(ctx, value_js)?;
+                    Ok((key_string, value))
+                })
+                .collect::<Result<HashMap<String, Value>, rquickjs::Error>>()?;
+            Ok(Value::Object(map))
         } else {
             Err(rquickjs::Exception::throw_message(
                 ctx,
@@ -110,6 +134,11 @@ impl ToString for Value {
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+            Value::Object(obj) => obj
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v.to_string()))
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }
@@ -125,6 +154,13 @@ impl From<&Value> for serde_json::Value {
                 let json_arr = arr.into_iter().map(Into::into).collect();
                 serde_json::Value::Array(json_arr)
             }
+            Value::Object(obj) => {
+                let json_obj = obj
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::from(v)))
+                    .collect();
+                serde_json::Value::Object(json_obj)
+            }
         }
     }
 }
@@ -138,14 +174,17 @@ pub enum JobRequest {
 impl fmt::Debug for JobRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobRequest::Map(input, _) => f.debug_struct("JobRequest::Map")
+            JobRequest::Map(input, _) => f
+                .debug_struct("JobRequest::Map")
                 .field("input", input)
                 .finish(),
-            JobRequest::Reduce(key, values, _) => f.debug_struct("JobRequest::Reduce")
+            JobRequest::Reduce(key, values, _) => f
+                .debug_struct("JobRequest::Reduce")
                 .field("key", key)
                 .field("values", values)
                 .finish(),
-            JobRequest::Sort(results, _) => f.debug_struct("JobRequest::Sort")
+            JobRequest::Sort(results, _) => f
+                .debug_struct("JobRequest::Sort")
                 .field("results", results)
                 .finish(),
         }
