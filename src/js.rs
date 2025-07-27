@@ -173,7 +173,11 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
 
             let eval_result = vm
                 .ctx
-                .with(|ctx| ctx.eval::<(), _>(js_code).map_err(|e| e.to_string()))
+                .with(|ctx| {
+                    ctx.eval::<(), _>(js_code)
+                        .catch(&ctx)
+                        .map_err(|e| e.to_string())
+                })
                 .await;
             if let Err(e) = eval_result {
                 error!("Error loading JS code: {}", e);
@@ -196,14 +200,16 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
                 let map_fn = ctx.globals()
                     .get::<_, Function>("map")
                     .or_else(|_| ctx.eval("map"))
-                    .map_err(|e| format!("map function not found: {:?}", e))?;
+                    .map_err(|e| format!("map function not found: {}", e))?;
                 let promise: Promise = map_fn
                     .call((input,))
-                    .map_err(|e| format!("Failed to call map function: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("Failed to call map function: {}", e))?;
                 let output: Vec<KeyValue> = promise
                     .into_future()
                     .await
-                    .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("JavaScript error: {}", e))?;
                 Ok(output)
             })
             .await;
@@ -218,14 +224,16 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
                 let reduce_fn = ctx.globals()
                     .get::<_, Function>("reduce")
                     .or_else(|_| ctx.eval("reduce"))
-                    .map_err(|e| format!("reduce function not found: {:?}", e))?;
+                    .map_err(|e| format!("reduce function not found: {}", e))?;
                 let promise: Promise = reduce_fn
                     .call((input, values))
-                    .map_err(|e| format!("Failed to call reduce function: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("Failed to call reduce function: {}", e))?;
                 let output: Value = promise
                     .into_future()
                     .await
-                    .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("JavaScript error: {}", e))?;
                 Ok(output)
             })
             .await;
@@ -240,14 +248,16 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
                 let sort_fn = ctx.globals()
                     .get::<_, Function>("sort")
                     .or_else(|_| ctx.eval("sort"))
-                    .map_err(|e| format!("sort function not found: {:?}", e))?;
+                    .map_err(|e| format!("sort function not found: {}", e))?;
                 let promise: Promise = sort_fn
                     .call((results,))
-                    .map_err(|e| format!("Failed to call sort function: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("Failed to call sort function: {}", e))?;
                 let output: Vec<KeyValue> = promise
                     .into_future()
                     .await
-                    .map_err(|e| format!("JavaScript error: {:?}", e))?;
+                    .catch(&ctx)
+                    .map_err(|e| format!("JavaScript error: {}", e))?;
                 Ok(output)
             })
             .await;
