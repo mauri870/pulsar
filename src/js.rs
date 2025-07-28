@@ -176,7 +176,7 @@ impl From<&Value> for serde_json::Value {
 }
 
 pub enum JobRequest {
-    Map(String, oneshot::Sender<JobResult>),
+    Map(Vec<String>, oneshot::Sender<JobResult>),
     Reduce(String, Vec<Value>, oneshot::Sender<JobResult>),
     Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
 }
@@ -223,7 +223,16 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
             let eval_result = vm
                 .ctx
                 .with(|ctx| {
-                    ctx.eval::<(), _>(js_code)
+                    let wrapper = r#"
+                        const flatMap = async (batch) => {
+                            if (typeof map !== 'function') {
+                                throw new Error('Map function is not defined');
+                            }
+                            return (await Promise.all(batch.map(map))).flat();
+                        };
+                    "#;
+
+                    ctx.eval::<(), _>(format!("{}\n{}", wrapper, js_code))
                         .catch(&ctx)
                         .map_err(|e| e.to_string())
                 })
@@ -244,14 +253,14 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
 #[instrument(level = "trace", skip(vm))]
 async fn handle_job(vm: &Vm, job: JobRequest) {
     match job {
-        JobRequest::Map(input, respond_to) => {
+        JobRequest::Map(batch, respond_to) => {
             let result = async_with!(vm.ctx => |ctx| {
-                let map_fn = ctx.globals()
-                    .get::<_, Function>("map")
-                    .or_else(|_| ctx.eval("map"))
-                    .map_err(|e| format!("map function not found: {}", e))?;
-                let promise: Promise = map_fn
-                    .call((input,))
+                let flat_map_fn = ctx.globals()
+                    .get::<_, Function>("flatMap")
+                    .or_else(|_| ctx.eval("flatMap"))
+                    .map_err(|e| format!("flatMap function not found: {}", e))?;
+                let promise: Promise = flat_map_fn
+                    .call((batch,))
                     .catch(&ctx)
                     .map_err(|e| format!("Failed to call map function: {}", e))?;
                 let output: Vec<KeyValue> = promise

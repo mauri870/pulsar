@@ -17,7 +17,6 @@ use std::fmt::{Debug, Display};
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
-const MAX_CONCURRENCY: Option<usize> = None;
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
@@ -101,9 +100,9 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     /// Run the application with streaming and optimized processing
     #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
-        let num_workers = num_cpus::get().max(1);
-        let mut workers = Vec::with_capacity(num_workers);
-        for _ in 0..num_workers {
+        let n_cpus = num_cpus::get().max(1);
+        let mut workers = Vec::with_capacity(n_cpus);
+        for _ in 0..n_cpus {
             let (worker_tx, worker_rx) = unbounded_channel();
             workers.push(worker_tx);
 
@@ -120,15 +119,15 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             .filter_map(
                 |r| async move { r.map_err(|e| eprintln!("Error reading line: {}", e)).ok() },
             )
-            .for_each_concurrent(MAX_CONCURRENCY, |line| {
-                let input = line.to_string();
+            .chunks(n_cpus)
+            .for_each_concurrent(None, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker = &workers[idx % workers.len()];
                 let map_tx = map_tx.clone();
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Map(input, resp_tx));
+                    let _ = worker.send(JobRequest::Map(batch, resp_tx));
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
@@ -158,7 +157,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // reduce phase
         let (reduce_tx, mut reduce_rx) = unbounded_channel();
         tokio_stream::iter(groups)
-            .for_each_concurrent(MAX_CONCURRENCY, |(key, values)| {
+            .for_each_concurrent(n_cpus, |(key, values)| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker = &workers[idx % workers.len()];
                 let reduce_tx = reduce_tx.clone();
