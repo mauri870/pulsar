@@ -177,7 +177,7 @@ impl From<&Value> for serde_json::Value {
 
 pub enum JobRequest {
     Map(Vec<String>, oneshot::Sender<JobResult>),
-    Reduce(String, Vec<Value>, oneshot::Sender<JobResult>),
+    Reduce(Vec<(String, Vec<Value>)>, oneshot::Sender<JobResult>),
     Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
 }
 
@@ -188,10 +188,9 @@ impl fmt::Debug for JobRequest {
                 .debug_struct("JobRequest::Map")
                 .field("input", input)
                 .finish(),
-            JobRequest::Reduce(key, values, _) => f
+            JobRequest::Reduce(pairs, _) => f
                 .debug_struct("JobRequest::Reduce")
-                .field("key", key)
-                .field("values", values)
+                .field("pairs", pairs)
                 .finish(),
             JobRequest::Sort(results, _) => f
                 .debug_struct("JobRequest::Sort")
@@ -204,7 +203,7 @@ impl fmt::Debug for JobRequest {
 #[derive(Debug, Clone)]
 pub enum JobResult {
     MapSuccess(Vec<KeyValue>),
-    ReduceSuccess(Value),
+    ReduceSuccess(Vec<KeyValue>),
     SortSuccess(Vec<KeyValue>),
     Error(String),
 }
@@ -229,6 +228,21 @@ pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
                                 throw new Error('Map function is not defined');
                             }
                             return (await Promise.all(batch.map(map))).flat();
+                        };
+
+                        const flatReduce = async (batch) => {
+                            if (typeof reduce !== 'function') {
+                                throw new Error('Reduce function is not defined');
+                            }
+
+                            const results = await Promise.all(
+                                batch.map(async ([key, values]) => {
+                                const reduced = await reduce(key, values);
+                                return [key, reduced];
+                                })
+                            );
+
+                            return results;
                         };
                     "#;
 
@@ -277,17 +291,21 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
                 Err(e) => respond_to.send(JobResult::Error(e)),
             };
         }
-        JobRequest::Reduce(input, values, respond_to) => {
+        JobRequest::Reduce(batch, respond_to) => {
             let result = async_with!(vm.ctx => |ctx| {
                 let reduce_fn = ctx.globals()
-                    .get::<_, Function>("reduce")
-                    .or_else(|_| ctx.eval("reduce"))
+                    .get::<_, Function>("flatReduce")
+                    .or_else(|_| ctx.eval("flatReduce"))
                     .map_err(|e| format!("reduce function not found: {}", e))?;
+                let batch_keyvalue: Vec<KeyValue> = batch
+                    .into_iter()
+                    .map(|(key, value)| KeyValue { key, value: Value::Array(value) })
+                    .collect();
                 let promise: Promise = reduce_fn
-                    .call((input, values))
+                    .call((batch_keyvalue,))
                     .catch(&ctx)
                     .map_err(|e| format!("Failed to call reduce function: {}", e))?;
-                let output: Value = promise
+                let output: Vec<KeyValue> = promise
                     .into_future()
                     .await
                     .catch(&ctx)

@@ -157,18 +157,22 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // reduce phase
         let (reduce_tx, mut reduce_rx) = unbounded_channel();
         tokio_stream::iter(groups)
-            .for_each_concurrent(n_cpus, |(key, values)| {
+            .chunks(n_cpus)
+            .for_each_concurrent(None, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker = &workers[idx % workers.len()];
                 let reduce_tx = reduce_tx.clone();
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Reduce(key.clone(), values, resp_tx));
+                    let _ = worker.send(JobRequest::Reduce(batch, resp_tx));
 
                     match resp_rx.await {
                         Ok(JobResult::ReduceSuccess(value)) => {
-                            let _ = reduce_tx.send((key, value));
+                            for kv in value {
+                                // Send each key-value pair to the reduce channel
+                                let _ = reduce_tx.send(kv);
+                            }
                         }
                         Ok(JobResult::Error(e)) => {
                             error!("Error during reduce: {}", e);
@@ -189,8 +193,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         if self.sort {
             let mut results = Vec::new();
-            while let Some((key, value)) = reduce_rx.recv().await {
-                results.push(js::KeyValue { key, value });
+            while let Some(kv) = reduce_rx.recv().await {
+                results.push(kv);
             }
 
             let (resp_tx, resp_rx) = oneshot::channel();
@@ -218,8 +222,9 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             };
         } else {
             // Write results as they arrive, no sorting
-            while let Some((key, value)) = reduce_rx.recv().await {
-                Self::format_and_print_result(&key, &value, &self.output_format, &mut writer).await;
+            while let Some(kv) = reduce_rx.recv().await {
+                Self::format_and_print_result(&kv.key, &kv.value, &self.output_format, &mut writer)
+                    .await;
             }
         }
         let _ = writer.flush().await;
