@@ -113,7 +113,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // aggregate map results
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
-        let consumer = tokio::spawn(async move {
+        let map_consumer = tokio::spawn(async move {
             let mut groups: HashMap<String, Vec<js::Value>> = HashMap::new();
             while let Some(kvs) = map_rx.recv().await {
                 for kv in kvs {
@@ -157,10 +157,57 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // group phase
         drop(map_tx);
-        let groups = consumer.await.unwrap();
+        let groups = map_consumer.await.unwrap();
+
+        // aggregate reduce results
+        let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(64);
+        let reduce_consumer = tokio::spawn({
+            let output_format = self.output_format.clone();
+            let sort = self.sort;
+            let workers = workers.clone(); // clone if needed
+            async move {
+                let stdout = tokio::io::stdout();
+                let mut writer = BufWriter::new(stdout);
+
+                if sort {
+                    let mut results = Vec::new();
+                    while let Some(kv) = reduce_rx.recv().await {
+                        results.push(kv);
+                    }
+
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let _ = workers[0].send(JobRequest::Sort(results, resp_tx));
+                    match resp_rx.await {
+                        Ok(JobResult::SortSuccess(output)) => {
+                            for kv in output {
+                                Self::format_and_print_result(
+                                    &kv.key,
+                                    &kv.value,
+                                    &output_format,
+                                    &mut writer,
+                                )
+                                .await;
+                            }
+                        }
+                        _ => error!("Sort error"),
+                    }
+                } else {
+                    while let Some(kv) = reduce_rx.recv().await {
+                        Self::format_and_print_result(
+                            &kv.key,
+                            &kv.value,
+                            &output_format,
+                            &mut writer,
+                        )
+                        .await;
+                    }
+                }
+
+                let _ = writer.flush().await;
+            }
+        });
 
         // reduce phase
-        let (reduce_tx, mut reduce_rx) = unbounded_channel();
         tokio_stream::iter(groups)
             .chunks(CHUNK_SIZE)
             .for_each_concurrent(n_cpus, |batch| {
@@ -175,8 +222,10 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     match resp_rx.await {
                         Ok(JobResult::ReduceSuccess(value)) => {
                             for kv in value {
-                                // Send each key-value pair to the reduce channel
-                                let _ = reduce_tx.send(kv);
+                                if let Err(e) = reduce_tx.send(kv).await {
+                                    error!("Failed to send reduce result: {}", e);
+                                    break;
+                                }
                             }
                         }
                         Ok(JobResult::Error(e)) => {
@@ -193,46 +242,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // write results
         drop(reduce_tx);
-        let stdout = tokio::io::stdout();
-        let mut writer = BufWriter::new(stdout);
 
-        if self.sort {
-            let mut results = Vec::new();
-            while let Some(kv) = reduce_rx.recv().await {
-                results.push(kv);
-            }
-
-            let (resp_tx, resp_rx) = oneshot::channel();
-            let _ = &workers[0].send(JobRequest::Sort(results, resp_tx));
-            match resp_rx.await {
-                Ok(JobResult::SortSuccess(output)) => {
-                    // Write all sorted results
-                    for kv in output {
-                        Self::format_and_print_result(
-                            &kv.key,
-                            &kv.value,
-                            &self.output_format,
-                            &mut writer,
-                        )
-                        .await;
-                    }
-                }
-                Ok(JobResult::Error(e)) => {
-                    error!("Error during sorting: {}", e);
-                }
-                Err(e) => {
-                    error!("JS worker error: {}", e);
-                }
-                _ => unreachable!(),
-            };
-        } else {
-            // Write results as they arrive, no sorting
-            while let Some(kv) = reduce_rx.recv().await {
-                Self::format_and_print_result(&kv.key, &kv.value, &self.output_format, &mut writer)
-                    .await;
-            }
-        }
-        let _ = writer.flush().await;
+        let _ = reduce_consumer.await;
 
         Ok(())
     }
