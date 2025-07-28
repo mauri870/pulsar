@@ -17,6 +17,7 @@ use std::fmt::{Debug, Display};
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
+const CHUNK_SIZE: usize = 32;
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
@@ -110,8 +111,17 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             js::start_vm_worker(self.script.clone(), worker_rx);
         }
 
-        // for map results
-        let (map_tx, mut map_rx) = unbounded_channel();
+        // aggregate map results
+        let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
+        let consumer = tokio::spawn(async move {
+            let mut groups: HashMap<String, Vec<js::Value>> = HashMap::new();
+            while let Some(kvs) = map_rx.recv().await {
+                for kv in kvs {
+                    groups.entry(kv.key).or_insert_with(Vec::new).push(kv.value);
+                }
+            }
+            groups
+        });
 
         // map phase
         let task_idx = AtomicUsize::new(0);
@@ -119,8 +129,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             .filter_map(
                 |r| async move { r.map_err(|e| eprintln!("Error reading line: {}", e)).ok() },
             )
-            .chunks(n_cpus)
-            .for_each_concurrent(None, |batch| {
+            .chunks(CHUNK_SIZE)
+            .for_each_concurrent(n_cpus, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker = &workers[idx % workers.len()];
                 let map_tx = map_tx.clone();
@@ -131,7 +141,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
-                            let _ = map_tx.send(output);
+                            let _ = map_tx.send(output).await;
                         }
                         Ok(JobResult::Error(e)) => {
                             error!("Error during map: {}", e);
@@ -147,18 +157,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // group phase
         drop(map_tx);
-        let mut groups: HashMap<String, Vec<js::Value>> = HashMap::new();
-        while let Some(kvs) = map_rx.recv().await {
-            for kv in kvs {
-                groups.entry(kv.key).or_insert_with(Vec::new).push(kv.value);
-            }
-        }
+        let groups = consumer.await.unwrap();
 
         // reduce phase
         let (reduce_tx, mut reduce_rx) = unbounded_channel();
         tokio_stream::iter(groups)
-            .chunks(n_cpus)
-            .for_each_concurrent(None, |batch| {
+            .chunks(CHUNK_SIZE)
+            .for_each_concurrent(n_cpus, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker = &workers[idx % workers.len()];
                 let reduce_tx = reduce_tx.clone();
