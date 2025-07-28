@@ -104,7 +104,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let n_cpus = num_cpus::get().max(1);
         let mut workers = Vec::with_capacity(n_cpus);
         for _ in 0..n_cpus {
-            let (worker_tx, worker_rx) = unbounded_channel();
+            let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(64);
             workers.push(worker_tx);
 
             // spawn each worker with its own receiver
@@ -137,7 +137,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Map(batch, resp_tx));
+                    let _ = worker.send(JobRequest::Map(batch, resp_tx)).await;
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
@@ -164,7 +164,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let reduce_consumer = tokio::spawn({
             let output_format = self.output_format.clone();
             let sort = self.sort;
-            let workers = workers.clone(); // clone if needed
+            let worker = workers[0].clone();
             async move {
                 let stdout = tokio::io::stdout();
                 let mut writer = BufWriter::new(stdout);
@@ -176,7 +176,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     }
 
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = workers[0].send(JobRequest::Sort(results, resp_tx));
+                    let _ = worker.send(JobRequest::Sort(results, resp_tx)).await;
                     match resp_rx.await {
                         Ok(JobResult::SortSuccess(output)) => {
                             for kv in output {
@@ -217,7 +217,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Reduce(batch, resp_tx));
+                    let _ = worker.send(JobRequest::Reduce(batch, resp_tx)).await;
 
                     match resp_rx.await {
                         Ok(JobResult::ReduceSuccess(value)) => {

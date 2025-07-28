@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::thread;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
 
@@ -209,7 +209,7 @@ pub enum JobResult {
 }
 
 #[instrument(level = "trace")]
-pub fn start_vm_worker(js_code: String, mut rx: UnboundedReceiver<JobRequest>) {
+pub fn start_vm_worker(js_code: String, mut rx: Receiver<JobRequest>) {
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
