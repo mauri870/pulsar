@@ -125,12 +125,15 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = num_cpus::get().max(1);
         let mut workers = Vec::with_capacity(n_cpus);
-        for _ in 0..n_cpus {
+        for idx in 0..n_cpus {
             let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(64);
             workers.push(worker_tx);
 
             // spawn each worker with its own receiver
-            js::start_vm_worker(self.script.clone(), worker_rx);
+            if let Err(e) = js::start_vm_worker(self.script.clone(), worker_rx) {
+                error!("Failed to start JS VM worker {}: {}", idx, e);
+                return Err(e.into());
+            }
         }
 
         // aggregate map results

@@ -5,7 +5,7 @@ use rquickjs::{Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
@@ -210,15 +210,21 @@ pub enum JobResult {
 }
 
 #[instrument(level = "trace")]
-pub fn start_vm_worker(js_code: String, mut rx: Receiver<JobRequest>) {
-    thread::spawn(move || {
+pub fn start_vm_worker(
+    js_code: String,
+    mut rx: Receiver<JobRequest>,
+) -> Result<JoinHandle<Result<()>>> {
+    let handle = thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap();
+            .context("Failed to create Tokio runtime")?;
 
         runtime.block_on(async move {
-            let vm = Vm::new().await.unwrap();
+            let vm = Vm::new()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+                .context("Failed to create VM")?;
 
             let eval_result = vm
                 .ctx
@@ -254,15 +260,19 @@ pub fn start_vm_worker(js_code: String, mut rx: Receiver<JobRequest>) {
                 .await;
             if let Err(e) = eval_result {
                 error!("Error loading JS code: {}", e);
-                return;
+                return Err(anyhow::anyhow!("Error loading JS code: {}", e));
             }
 
             while let Some(job) = rx.recv().await {
                 handle_job(&vm, job).await;
             }
             let _ = vm.idle().await;
-        });
+
+            Ok(())
+        })
     });
+
+    Ok(handle)
 }
 
 #[instrument(level = "trace", skip(vm))]
