@@ -52,23 +52,23 @@ const STOP_WORDS = new Set([
   "their", "then", "there", "these", "they", "this", "to", "was", "will", "with"
 ]);
 
-const map = async line => line
-  .toLowerCase()
-  .replace(/[^\p{L}\p{N}]+/gu, ' ')
-  .trim()
-  .split(/\s+/)
-  .filter(word => 
-    word && 
-    !STOP_WORDS.has(word) &&
-    !/\d/.test(word)    // filter out any word containing digits
-  )
-  .map(word => [word, 1]);
+const map = async (line) =>
+  line
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(
+      (word) => word && !STOP_WORDS.has(word) && !/\d/.test(word) // filter out any word containing digits
+    )
+    .map((word) => [word, 1]);
 
 const reduce = async (key, values) => values.length;
 
-const sort = async results =>
+const sort = async (results) =>
   results.sort((a, b) => a[0].localeCompare(b[0])); // Sort alphabetically
 ```
+
 </details>
 
 ```bash
@@ -88,7 +88,7 @@ Summarize web server logs to count logs per status codes:
 <summary>script.js</summary>
 
 ```js
-const map = async line => {
+const map = async (line) => {
   // Parse Apache/Nginx log line example:
   // 127.0.0.1 - - [01/Jan/2023:00:00:01 +0000] "GET /path HTTP/1.1" 200 1234
   // Extract the HTTP status code (e.g. 200)
@@ -103,6 +103,7 @@ const map = async line => {
 const reduce = async (key, values) =>
   values.reduce((sum, count) => sum + count, 0);
 ```
+
 </details>
 
 ```bash
@@ -120,13 +121,18 @@ You could build on this to aggregate local vs internet IPs, then print the resul
 <summary>script.js</summary>
 
 ```js
-const isLocal = ip => {
-  const [a, b] = ip.split('.').map(Number);
-  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a === 127;
+const isLocal = (ip) => {
+  const [a, b] = ip.split(".").map(Number);
+  return (
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a === 127
+  );
 };
 
-const map = async line =>
-  [...line.matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)].map(m => {
+const map = async (line) =>
+  [...line.matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)].map((m) => {
     const ip = m[1];
     const type = isLocal(ip) ? "local" : "internet";
     return [type, ip];
@@ -134,6 +140,7 @@ const map = async line =>
 
 const reduce = async (key, values) => Array.from(new Set(values)); // deduplicate IPs
 ```
+
 </details>
 
 ```bash
@@ -223,9 +230,14 @@ Benchmark 2 (3 runs): node node-script.js input.txt
   cache_misses       54.7M  ±  583K     54.0M  … 55.1M           0 ( 0%)        💩+ 66.1% ±  7.8%
   branch_misses      28.5M  ± 2.14M     27.2M  … 31.0M           0 ( 0%)        💩+ 89.5% ±  6.1%
 ```
+
 </details>
 
 ## Tests
+
+Each script can define a `async function test()` that will be executed when running the `pulsar` command with the `--test` flag.
+
+For pulsar itself, there is a very modest test suite that you can run with [bats](https://github.com/bats-core/bats-core):
 
 ```bash
 bats tests
