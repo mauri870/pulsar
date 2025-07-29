@@ -9,15 +9,15 @@ By default, if no JS script is provided, it performs a simple word count. See `d
 ## Compilation
 
 ```bash
-cargo build --release
+nvm use 22
+(cd llrt && npm i && make js)
+cargo install --path=.
 ```
-
-The binary will be located at ./target/release/pulsar.
 
 ## Usage
 
 ```bash
-./target/release/pulsar -f input_file -s script_file
+pulsar -f input_file -s script_file
 ```
 
 ## Examples
@@ -32,7 +32,7 @@ $ wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
 $ wc -l input.txt
 21940
 
-$ cat input.txt | ./target/release/pulsar
+$ cat input.txt | pulsar
 ...
 bluish: 2
 pedlar: 1
@@ -72,7 +72,7 @@ const sort = async (results) =>
 </details>
 
 ```bash
-$ ./target/release/pulsar -f input.txt -s script.js --sort | head -n5
+$ pulsar -f input.txt -s script.js --sort | head -n5
 aback: 2
 abaft: 2
 abandon: 3
@@ -108,7 +108,7 @@ const reduce = async (key, values) =>
 
 ```bash
 docker run --rm mingrammer/flog -n 1000 >> /tmp/access.log
-$ ./target/release/pulsar -f /tmp/access.log -s script.js
+$ pulsar -f /tmp/access.log -s script.js
 501: 47
 416: 50
 404: 43
@@ -144,7 +144,7 @@ const reduce = async (key, values) => Array.from(new Set(values)); // deduplicat
 </details>
 
 ```bash
-$ ./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
+$ pulsar -f /tmp/access.log -s script.js --output=json | jq
 {
   "local": [
     "172.22.38.139",
@@ -161,7 +161,7 @@ $ ./target/release/pulsar -f /tmp/access.log -s script.js --output=json | jq
 If you want to go further, we can turn this into a simple network server:
 
 ```bash
-$ socat TCP-LISTEN:1234,reuseaddr,fork EXEC:"./target/release/pulsar -s script.js --output=json" &
+$ socat TCP-LISTEN:1234,reuseaddr,fork EXEC:"pulsar -s script.js --output=json" &
 $ echo "138.97.172.41 - - [26/Jul/2025:17:27:15 +0000] "PATCH /matrix/morph HTTP/1.0" 401 9375" | socat - TCP:localhost:1234
 {"internet":["138.97.172.41"]}
 $ killall socat
