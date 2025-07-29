@@ -268,6 +268,54 @@ EOF
   rm -rf "$TMPDIR"
 }
 
+@test "runs test script" {
+  TMPDIR=$(mktemp -d)
+  TESTFILE="$TMPDIR/test.txt"
+  SCRIPTFILE="$TMPDIR/script.js"
+  OUTFILE="$TMPDIR/out.txt"
+
+  echo -e "0\n1\n2\n3" > "$TESTFILE"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = async line => line.split(' ').map(word => [word, 1]);
+
+const reduce = async (key, values) => values.length;
+
+var test = async () => {
+  const input = "The quick brown fox jumps over the lazy dog";
+  const result = await map(input);
+  const expectedWords = [
+    "the", "quick", "brown", "fox",
+    "jumps", "over", "the", "lazy", "dog"
+  ];
+  if (result.length !== expectedWords.length) {
+    throw new Error("incorrect number of words, wanted " + expectedWords.length + ", got " + result.length);
+  }
+};
+EOF
+  run "$BIN" -f "$TESTFILE" test "$SCRIPTFILE"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "OK" ]]
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = async line => line.split(' ').map(word => [word, 1]);
+
+const reduce = async (key, values) => values.length;
+
+var test = async () => {
+  const input = "The quick brown fox jumps over the lazy dog";
+  const result = await map(input);
+  if (result.length !== -1) { // Just so it fails
+    throw new Error("this is a test failure");
+  }
+};
+EOF
+  run "$BIN" -f "$TESTFILE" test "$SCRIPTFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "this is a test failure" ]]
+  rm -rf "$TMPDIR"
+}
+
 @test "output plain" {
   TMPDIR=$(mktemp -d)
   OUTFILE="$TMPDIR/out.txt"

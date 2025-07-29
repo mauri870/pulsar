@@ -1,13 +1,15 @@
+use anyhow::{Context, Result};
 use llrt_core::vm::Vm;
 use rquickjs::{CatchResultExt, Coerced};
 use rquickjs::{Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::thread;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -344,4 +346,59 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
             };
         }
     }
+}
+
+#[instrument(level = "trace")]
+pub fn run_test_file(code: String) -> Result<()> {
+    let handle = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("Failed to create Tokio runtime")?;
+
+        runtime.block_on(async move {
+            let vm = Vm::new()
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))
+                .context("Failed to create VM")?;
+
+            vm.ctx
+                .with(|ctx| {
+                    ctx.eval::<(), _>(code)
+                        .catch(&ctx)
+                        .map_err(|e| anyhow::anyhow!("JS eval error: {}", e))
+                })
+                .await?;
+
+            let result = async_with!(vm.ctx => |ctx| {
+                let test_fn = ctx.globals()
+                    .get::<_, Function>("test")
+                    .or_else(|_| ctx.eval("test"))
+                    .context("test function not found")?;
+
+                let promise: Promise = test_fn
+                    .call(())
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("Failed to call test function: {}", e))?;
+
+                let () = promise
+                    .into_future()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|e| anyhow::anyhow!("JavaScript error: {}", e))?;
+
+                Ok(())
+            })
+            .await;
+
+            let _ = vm.idle().await;
+
+            result
+        })
+    });
+
+    // Wait for the thread and propagate errors
+    handle
+        .join()
+        .map_err(|e| anyhow::anyhow!("Thread panicked: {:?}", e))?
 }
