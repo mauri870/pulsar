@@ -17,7 +17,7 @@ use std::fmt::{Debug, Display};
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
-const CHUNK_SIZE: usize = 32;
+const CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
