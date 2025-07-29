@@ -238,8 +238,8 @@ pub fn start_vm_worker(js_code: String, mut rx: Receiver<JobRequest>) {
 
                             const results = await Promise.all(
                                 batch.map(async ([key, values]) => {
-                                const reduced = await reduce(key, values);
-                                return [key, reduced];
+                                    const reduced = await reduce(key, values);
+                                    return [key, reduced];
                                 })
                             );
 
