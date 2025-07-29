@@ -1,7 +1,6 @@
 #!/bin/bash
 
-set -e
+cargo rustc --release --bin pulsar -- -C debuginfo=2
 
-cargo b --release
-perf record -g -F 999 -- ./target/release/pulsar -f input.txt 
+perf record -g -F 999 --call-graph dwarf -- ./target/release/pulsar -f input.txt
 perf script -F +pid > profile.perf
