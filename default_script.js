@@ -22,25 +22,27 @@ const sort = async (results) =>
     results.sort((a, b) => a[0].localeCompare(b[0])) // Sort alphabetically
 
 // Test function:
-// This function is called when the test command is run.
+// Used to make assertions about the behavior of the map, reduce, and sort functions.
+// This function is only run with the test command.
 const test = async () => {
     const input = "The quick brown fox jumps over the lazy dog";
     const result = await map(input);
-    const expectedWords = [
-        "the", "quick", "brown", "fox",
-        "jumps", "over", "the", "lazy", "dog"
+    const expected = [
+        ["the", 1],
+        ["quick", 1],
+        ["brown", 1],
+        ["fox", 1],
+        ["jumps", 1],
+        ["over", 1],
+        ["the", 1],
+        ["lazy", 1],
+        ["dog", 1]
     ];
-    if (result.length !== expectedWords.length) {
-        throw new Error(`Map test failed: expected ${expectedWords.length} pairs, got ${result.length}`);
-    }
-    for (let i = 0; i < result.length; i++) {
-        const [word, count] = result[i];
-        if (word !== expectedWords[i] || count !== 1) {
-            throw new Error(`Map test failed at index ${i}: expected [${expectedWords[i]}, 1], got [${word}, ${count}]`);
-        }
+    const str = JSON.stringify;
+    if (str(result) !== str(expected)) {
+        throw new Error(`Map test failed: expected ${str(expected)}, got ${str(result)}`);
     }
 
-    // === Test reduce ===
     const key = "the";
     const values = [1, 1, 1];
     const reduced = await reduce(key, values);
@@ -48,11 +50,9 @@ const test = async () => {
         throw new Error(`Reduce test failed: expected 3, got ${reduced}`);
     }
 
-    // === Test sort ===
     const unsorted = [["zebra", 1], ["apple", 1], ["monkey", 1]];
-    const sorted = await sort([...unsorted]); // clone to avoid mutating original
+    const sorted = await sort([...unsorted]);
     const sortedExpected = [["apple", 1], ["monkey", 1], ["zebra", 1]];
-    const str = JSON.stringify;
     if (str(sorted) !== str(sortedExpected)) {
         throw new Error(`Sort test failed:\nExpected: ${str(sortedExpected)}\nGot: ${str(sorted)}`);
     }

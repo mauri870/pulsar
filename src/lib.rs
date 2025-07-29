@@ -8,7 +8,7 @@ use tokio::{
     sync::oneshot,
 };
 use tokio_stream::wrappers::LinesStream;
-use tracing::{error, info};
+use tracing::error;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};

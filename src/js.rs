@@ -5,11 +5,10 @@ use rquickjs::{Function, async_with, prelude::Promise};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
 use std::thread;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tracing::{error, info, instrument};
+use tracing::{error, instrument};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
