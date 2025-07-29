@@ -293,7 +293,7 @@ var test = async () => {
   }
 };
 EOF
-  run "$BIN" -f "$TESTFILE" test "$SCRIPTFILE"
+  run "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" --test
   [ "$status" -eq 0 ]
   [[ "$output" =~ "OK" ]]
 
@@ -310,7 +310,7 @@ var test = async () => {
   }
 };
 EOF
-  run "$BIN" -f "$TESTFILE" test "$SCRIPTFILE"
+  run "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE" --test
   [ "$status" -eq 1 ]
   [[ "$output" =~ "this is a test failure" ]]
   rm -rf "$TMPDIR"

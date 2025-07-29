@@ -11,7 +11,7 @@ use tokio_stream::wrappers::LinesStream;
 use tracing::error;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use tracing::instrument;
@@ -24,9 +24,6 @@ const CHUNK_SIZE: usize = 64;
 #[command(about = "A simple map-reduce engine for parallel processing")]
 #[command(author, version)]
 pub struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
     /// Input file to read input data from.
     #[arg(short = 'f', default_value = "-")]
     input_file: String,
@@ -42,11 +39,10 @@ pub struct Cli {
     /// Whether to sort the output before printing. Assumes the script has a `sort` function.
     #[arg(long = "sort", action = clap::ArgAction::SetTrue)]
     sort: bool,
-}
 
-#[derive(Debug, Subcommand)]
-enum Commands {
-    Test { files: Option<Vec<String>> },
+    /// Run in test mode, executing the script against test cases.
+    #[arg(long = "test", action = clap::ArgAction::SetTrue)]
+    test: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -70,7 +66,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     script: String,
     sort: bool,
     output_format: OutputFormat,
-    command: Option<Commands>,
+    test: bool,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -104,33 +100,24 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             script: script.clone(),
             output_format: cli.output_format,
             sort: cli.sort,
-            command: cli.command,
+            test: cli.test,
         })
     }
 
     /// Run the application with streaming and optimized processing
     #[instrument(level = "trace")]
     pub async fn run(self) -> Result<()> {
-        match &self.command {
-            Some(Commands::Test { files }) => self.run_tests(files).await,
-            None => self.run_engine().await,
+        if self.test {
+            return self.run_tests().await;
         }
+
+        self.run_engine().await
     }
 
     #[instrument(level = "trace")]
-    pub async fn run_tests(&self, files: &Option<Vec<String>>) -> Result<()> {
-        if files.is_none() {
-            js::run_test_file(self.script.clone())?;
-            println!("OK");
-            return Ok(());
-        }
-
-        for file in files.as_ref().unwrap() {
-            print!("{}: ", file);
-            let code = tokio::fs::read_to_string(file).await?;
-            js::run_test_file(code)?;
-            println!("OK");
-        }
+    pub async fn run_tests(&self) -> Result<()> {
+        js::run_test_file(self.script.clone())?;
+        println!("OK");
         Ok(())
     }
 
