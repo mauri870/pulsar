@@ -5,7 +5,7 @@ use js::{JobRequest, JobResult};
 use std::sync::atomic::AtomicUsize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::{mpsc::unbounded_channel, oneshot},
+    sync::oneshot,
 };
 use tokio_stream::wrappers::LinesStream;
 use tracing::error;
@@ -242,7 +242,6 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // write results
         drop(reduce_tx);
-
         let _ = reduce_consumer.await;
 
         Ok(())
