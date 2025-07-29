@@ -23,7 +23,7 @@ const sort = async (results) =>
 
 // Test function:
 // Used to make assertions about the behavior of the map, reduce, and sort functions.
-// This function is only run with the test command.
+// This function is only executed when the `--test` flag is passed.
 const test = async () => {
     const input = "The quick brown fox jumps over the lazy dog";
     const result = await map(input);
