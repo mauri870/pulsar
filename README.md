@@ -32,16 +32,12 @@ $ wget https://www.gutenberg.org/files/2701/2701-0.txt -O input.txt
 $ wc -l input.txt
 21940
 
-$ time cat input.txt | ./target/release/pulsar
+$ cat input.txt | ./target/release/pulsar
 ...
 bluish: 2
 pedlar: 1
 magazine: 2
 reckless: 5
-
-real	0m0.282s
-user	0m2.020s
-sys	  0m0.270s
 ```
 
 You could provide a script to ignore stop words and sort the results:
