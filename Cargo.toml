@@ -3,6 +3,9 @@ name = "pulsar"
 version = "0.1.0"
 edition = "2024"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dependencies]
 async-trait = "0.1"
 llrt_core = { path = "llrt/llrt_core", default-features = true }
@@ -19,3 +22,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3.31"
 tokio-stream = { version = "0.1.17", features = ["io-util"] }
+

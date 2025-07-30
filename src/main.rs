@@ -3,6 +3,13 @@ use clap::Parser;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let subscriber = tracing_subscriber::fmt()
