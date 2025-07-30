@@ -2,14 +2,14 @@ mod js;
 
 use futures::stream::StreamExt;
 use js::{JobRequest, JobResult};
-use std::sync::atomic::AtomicUsize;
+use std::{collections::HashMap, sync::atomic::AtomicUsize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     sync::oneshot,
     task::JoinHandle,
 };
 use tokio_stream::wrappers::LinesStream;
-use tracing::error;
+use tracing::{error, info};
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -140,33 +140,72 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
         let map_consumer: JoinHandle<Result<sled::Db>> = tokio::spawn(async move {
             let groups_db = sled::Config::default()
+                .path("pulsar_groups")
                 .temporary(true)
-                .cache_capacity(4 * 1024 * 1024 * 1024) // 4GB
+                .cache_capacity(2 * 1024 * 1024 * 1024) // 2GB
                 .open()?;
+
+            let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
+            const FLUSH_THRESHOLD: usize = 10_000;
 
             while let Some(kvs) = map_rx.recv().await {
                 for kv in kvs {
-                    let mut values: Vec<js::Value> = match groups_db.get(&kv.key)? {
+                    let _ = hashmap
+                        .entry(kv.key.clone())
+                        .or_insert_with(Vec::new)
+                        .push(kv.value);
+                }
+
+                if hashmap.len() >= FLUSH_THRESHOLD {
+                    info!("Flushing {} entries to DB", hashmap.len(),);
+                    // Batch insert
+                    let mut batch = sled::Batch::default();
+                    for (key, mut values) in hashmap.drain() {
+                        // Merge with existing values
+                        let mut all_values = match groups_db.get(&key)? {
+                            Some(raw_bytes) => {
+                                serde_json::from_slice(&raw_bytes).unwrap_or_else(|e| {
+                                    error!(
+                                        "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
+                                        &key,
+                                        e
+                                    );
+                                    Vec::new()
+                                })
+                            }
+                            None => Vec::new(),
+                        };
+                        all_values.append(&mut values);
+                        let updated_value_bytes = serde_json::to_vec(&all_values)?;
+                        batch.insert(key.as_bytes(), updated_value_bytes);
+                    }
+                    groups_db.apply_batch(batch)?;
+                }
+            }
+
+            // Flush any remaining entries
+            if !hashmap.is_empty() {
+                info!("Final flush of {} entries to DB", hashmap.len());
+                let mut batch = sled::Batch::default();
+                for (key, mut values) in hashmap.drain() {
+                    let mut all_values = match groups_db.get(&key)? {
                         Some(raw_bytes) => {
                             serde_json::from_slice(&raw_bytes).unwrap_or_else(|e| {
                                 error!(
                                     "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
-                                    &kv.key,
+                                    &key,
                                     e
                                 );
                                 Vec::new()
                             })
                         }
-                        None => {
-                            Vec::new()
-                        }
+                        None => Vec::new(),
                     };
-
-                    values.push(kv.value);
-
-                    let updated_value_bytes = serde_json::to_vec(&values)?;
-                    groups_db.insert(kv.key.as_bytes(), updated_value_bytes)?;
+                    all_values.append(&mut values);
+                    let updated_value_bytes = serde_json::to_vec(&all_values)?;
+                    batch.insert(key.as_bytes(), updated_value_bytes);
                 }
+                groups_db.apply_batch(batch)?;
             }
             Ok(groups_db)
         });
