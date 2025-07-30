@@ -12,9 +12,10 @@ const map = async line => line
 // Optional Combine function:
 // Receives an array of [key, value] pairs and returns an aggregated array
 // of [key, value] pairs.
-// It can be used for early aggregation to combine results before reduction.
-// This can improve performance in cases where the map function produces
-// a large number of intermediate results.
+// It can be used to perform early aggregation on batches, combining results
+// before the reduction step.
+// This can improve performance when the map function produces a large
+// number of intermediate results.
 const combine = async (values) =>
   Object.entries(
     values.reduce((acc, [key, value]) => {
