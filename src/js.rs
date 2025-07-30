@@ -234,7 +234,12 @@ pub fn start_vm_worker(
                             if (typeof map !== 'function') {
                                 throw new Error('Map function is not defined');
                             }
-                            return (await Promise.all(batch.map(map))).flat();
+
+                            let mapped = (await Promise.all(batch.map(map))).flat()
+                            if (typeof combine !== 'function') {
+                                return mapped;
+                            }
+                            return await combine(mapped);
                         };
 
                         const flatReduce = async (batch) => {

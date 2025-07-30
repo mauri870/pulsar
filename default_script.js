@@ -9,6 +9,20 @@ const map = async line => line
     .filter(Boolean)
     .map(word => [word, 1]);
 
+// Optional Combine function:
+// Receives an array of [key, value] pairs and returns an aggregated array
+// of [key, value] pairs.
+// It can be used for early aggregation to combine results before reduction.
+// This can improve performance in cases where the map function produces
+// a large number of intermediate results.
+const combine = async (values) =>
+  Object.entries(
+    values.reduce((acc, [key, value]) => {
+      acc[key] = (acc[key] || 0) + value;
+      return acc;
+    }, {})
+  );
+
 // Reduce function:
 // Receives a key and all values associated with that key.
 // Should return a aggregated value for the key.
@@ -25,35 +39,52 @@ const sort = async (results) =>
 // Used to make assertions about the behavior of the map, reduce, and sort functions.
 // This function is only executed when the `--test` flag is passed.
 const test = async () => {
-    const input = "The quick brown fox jumps over the lazy dog";
-    const result = await map(input);
-    const expected = [
-        ["the", 1],
-        ["quick", 1],
-        ["brown", 1],
-        ["fox", 1],
-        ["jumps", 1],
-        ["over", 1],
-        ["the", 1],
-        ["lazy", 1],
-        ["dog", 1]
-    ];
     const str = JSON.stringify;
-    if (str(result) !== str(expected)) {
-        throw new Error(`Map test failed: expected ${str(expected)}, got ${str(result)}`);
-    }
+    await (async () => {
+        const input = "The quick brown fox jumps over the lazy dog";
+        const result = await map(input);
+        const expected = [
+            ["the", 1],
+            ["quick", 1],
+            ["brown", 1],
+            ["fox", 1],
+            ["jumps", 1],
+            ["over", 1],
+            ["the", 1],
+            ["lazy", 1],
+            ["dog", 1]
+        ];
+        if (str(result) !== str(expected)) {
+            throw new Error(`Map test failed: expected ${str(expected)}, got ${str(result)}`);
+        }
+    })();
 
-    const key = "the";
-    const values = [1, 1, 1];
-    const reduced = await reduce(key, values);
-    if (reduced !== 3) {
-        throw new Error(`Reduce test failed: expected 3, got ${reduced}`);
-    }
+    await (async () => {
+        const input = [
+            ["apple", 1],
+            ["banana", 1],
+            ["apple", 1]
+        ];
+        const want = [["apple", 2], ["banana", 1]];
+        const combined = await combine(input);
+        if (str(combined) !== str(want)) {
+            throw new Error(`Combine test failed: expected ${str(want)}, got ${str(combined)}`);
+        }
+    })();
 
-    const unsorted = [["zebra", 1], ["apple", 1], ["monkey", 1]];
-    const sorted = await sort([...unsorted]);
-    const sortedExpected = [["apple", 1], ["monkey", 1], ["zebra", 1]];
-    if (str(sorted) !== str(sortedExpected)) {
-        throw new Error(`Sort test failed:\nExpected: ${str(sortedExpected)}\nGot: ${str(sorted)}`);
-    }
+    await (async () => {
+        const key = "the";
+        const values = [1, 1, 1];
+        const reduced = await reduce(key, values);
+        if (reduced !== 3) {
+            throw new Error(`Reduce test failed: expected 3, got ${reduced}`);
+        }
+
+        const unsorted = [["zebra", 1], ["apple", 1], ["monkey", 1]];
+        const sorted = await sort([...unsorted]);
+        const sortedExpected = [["apple", 1], ["monkey", 1], ["zebra", 1]];
+        if (str(sorted) !== str(sortedExpected)) {
+            throw new Error(`Sort test failed:\nExpected: ${str(sortedExpected)}\nGot: ${str(sorted)}`);
+        }
+    })();
 };
