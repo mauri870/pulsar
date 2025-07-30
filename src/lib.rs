@@ -1,5 +1,6 @@
 mod js;
 
+use bincode::{deserialize, serialize};
 use futures::stream::StreamExt;
 use js::{JobRequest, JobResult};
 use std::{collections::HashMap, sync::atomic::AtomicUsize};
@@ -157,14 +158,14 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 }
 
                 if hashmap.len() >= FLUSH_THRESHOLD {
-                    info!("Flushing {} entries to DB", hashmap.len(),);
+                    info!("Flushing {} entries to DB", hashmap.len());
                     // Batch insert
                     let mut batch = sled::Batch::default();
                     for (key, mut values) in hashmap.drain() {
                         // Merge with existing values
                         let mut all_values = match groups_db.get(&key)? {
                             Some(raw_bytes) => {
-                                serde_json::from_slice(&raw_bytes).unwrap_or_else(|e| {
+                                deserialize::<Vec<js::Value>>(&raw_bytes).unwrap_or_else(|e| {
                                     error!(
                                         "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
                                         &key,
@@ -176,7 +177,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                             None => Vec::new(),
                         };
                         all_values.append(&mut values);
-                        let updated_value_bytes = serde_json::to_vec(&all_values)?;
+                        let updated_value_bytes = serialize(&all_values)?;
                         batch.insert(key.as_bytes(), updated_value_bytes);
                     }
                     groups_db.apply_batch(batch)?;
@@ -190,7 +191,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 for (key, mut values) in hashmap.drain() {
                     let mut all_values = match groups_db.get(&key)? {
                         Some(raw_bytes) => {
-                            serde_json::from_slice(&raw_bytes).unwrap_or_else(|e| {
+                            deserialize::<Vec<js::Value>>(&raw_bytes).unwrap_or_else(|e| {
                                 error!(
                                     "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
                                     &key,
@@ -202,7 +203,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         None => Vec::new(),
                     };
                     all_values.append(&mut values);
-                    let updated_value_bytes = serde_json::to_vec(&all_values)?;
+                    let updated_value_bytes = serialize(&all_values)?;
                     batch.insert(key.as_bytes(), updated_value_bytes);
                 }
                 groups_db.apply_batch(batch)?;
@@ -307,7 +308,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             })
             .map(|(k, value_bytes)| {
                 let key: String = String::from_utf8_lossy(&k).to_string();
-                let values: Vec<js::Value> = serde_json::from_slice(&value_bytes).unwrap_or_else(|e| {
+                let values: Vec<js::Value> = deserialize(&value_bytes).unwrap_or_else(|e| {
                     error!(
                         "Failed to deserialize DB value for key '{:?}': {}. Discarding corrupted data.",
                         &k,
