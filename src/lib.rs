@@ -139,10 +139,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // aggregate map results
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
         let map_consumer = tokio::spawn(async move {
-            let mut groups: HashMap<String, Vec<js::Value>> = HashMap::new();
+            let mut groups: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
             while let Some(kvs) = map_rx.recv().await {
                 for kv in kvs {
-                    groups.entry(kv.key).or_insert_with(Vec::new).push(kv.value);
+                    groups
+                        .entry(kv.key)
+                        .or_insert_with(Vec::new)
+                        .push(serde_json::to_vec(&kv.value).expect("Failed to serialize value"));
                 }
             }
             groups
@@ -233,37 +236,43 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         });
 
         // reduce phase
-        tokio_stream::iter(groups)
-            .chunks(CHUNK_SIZE)
-            .for_each_concurrent(n_cpus, |batch| {
-                let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let worker = &workers[idx % workers.len()];
-                let reduce_tx = reduce_tx.clone();
+        tokio_stream::iter(groups.into_iter().map(|(key, value)| {
+            let value: Vec<js::Value> = value
+                .into_iter()
+                .map(|v| serde_json::from_slice(&v).expect("Failed to decode value"))
+                .collect();
+            (key, value)
+        }))
+        .chunks(CHUNK_SIZE)
+        .for_each_concurrent(n_cpus, |batch| {
+            let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let worker = &workers[idx % workers.len()];
+            let reduce_tx = reduce_tx.clone();
 
-                async move {
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Reduce(batch, resp_tx)).await;
+            async move {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let _ = worker.send(JobRequest::Reduce(batch, resp_tx)).await;
 
-                    match resp_rx.await {
-                        Ok(JobResult::ReduceSuccess(value)) => {
-                            for kv in value {
-                                if let Err(e) = reduce_tx.send(kv).await {
-                                    error!("Failed to send reduce result: {}", e);
-                                    break;
-                                }
+                match resp_rx.await {
+                    Ok(JobResult::ReduceSuccess(value)) => {
+                        for kv in value {
+                            if let Err(e) = reduce_tx.send(kv).await {
+                                error!("Failed to send reduce result: {}", e);
+                                break;
                             }
                         }
-                        Ok(JobResult::Error(e)) => {
-                            error!("Error during reduce: {}", e);
-                        }
-                        Err(e) => {
-                            error!("JS worker error: {}", e);
-                        }
-                        _ => unreachable!(),
-                    };
-                }
-            })
-            .await;
+                    }
+                    Ok(JobResult::Error(e)) => {
+                        error!("Error during reduce: {}", e);
+                    }
+                    Err(e) => {
+                        error!("JS worker error: {}", e);
+                    }
+                    _ => unreachable!(),
+                };
+            }
+        })
+        .await;
 
         // write results
         drop(reduce_tx);
