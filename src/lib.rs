@@ -6,13 +6,13 @@ use std::sync::atomic::AtomicUsize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     sync::oneshot,
+    task::JoinHandle,
 };
 use tokio_stream::wrappers::LinesStream;
 use tracing::error;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use tracing::instrument;
 
@@ -138,17 +138,37 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // aggregate map results
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
-        let map_consumer = tokio::spawn(async move {
-            let mut groups: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+        let map_consumer: JoinHandle<Result<sled::Db>> = tokio::spawn(async move {
+            let groups_db = sled::Config::default()
+                .temporary(true)
+                .cache_capacity(4 * 1024 * 1024 * 1024) // 4GB
+                .open()?;
+
             while let Some(kvs) = map_rx.recv().await {
                 for kv in kvs {
-                    groups
-                        .entry(kv.key)
-                        .or_insert_with(Vec::new)
-                        .push(serde_json::to_vec(&kv.value).expect("Failed to serialize value"));
+                    let mut values: Vec<js::Value> = match groups_db.get(&kv.key)? {
+                        Some(raw_bytes) => {
+                            serde_json::from_slice(&raw_bytes).unwrap_or_else(|e| {
+                                error!(
+                                    "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
+                                    &kv.key,
+                                    e
+                                );
+                                Vec::new()
+                            })
+                        }
+                        None => {
+                            Vec::new()
+                        }
+                    };
+
+                    values.push(kv.value);
+
+                    let updated_value_bytes = serde_json::to_vec(&values)?;
+                    groups_db.insert(kv.key.as_bytes(), updated_value_bytes)?;
                 }
             }
-            groups
+            Ok(groups_db)
         });
 
         // map phase
@@ -185,7 +205,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // group phase
         drop(map_tx);
-        let groups = map_consumer.await.unwrap();
+        let groups = map_consumer.await?.unwrap();
 
         // aggregate reduce results
         let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(64);
@@ -236,15 +256,30 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         });
 
         // reduce phase
-        tokio_stream::iter(groups.into_iter().map(|(key, value)| {
-            let value: Vec<js::Value> = value
-                .into_iter()
-                .map(|v| serde_json::from_slice(&v).expect("Failed to decode value"))
-                .collect();
-            (key, value)
+        tokio_stream::iter(groups.iter()
+            .filter_map(|res| {
+                match res {
+                    Ok((key, value)) => Some((key, value)),
+                    Err(e) => {
+                        eprintln!("Error iterating sled db: {}", e);
+                        None // Skip entries that cause an error
+                    }
+                }
+            })
+            .map(|(k, value_bytes)| {
+                let key: String = String::from_utf8_lossy(&k).to_string();
+                let values: Vec<js::Value> = serde_json::from_slice(&value_bytes).unwrap_or_else(|e| {
+                    error!(
+                        "Failed to deserialize DB value for key '{:?}': {}. Discarding corrupted data.",
+                        &k,
+                        e
+                    );
+                    Vec::new()
+                });
+                (key, values)
         }))
         .chunks(CHUNK_SIZE)
-        .for_each_concurrent(n_cpus, |batch| {
+        .for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
             let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let worker = &workers[idx % workers.len()];
             let reduce_tx = reduce_tx.clone();

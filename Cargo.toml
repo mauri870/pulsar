@@ -22,4 +22,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3.31"
 tokio-stream = { version = "0.1.17", features = ["io-util"] }
+sled = "0.34.7"
 
