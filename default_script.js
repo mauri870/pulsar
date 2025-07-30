@@ -26,7 +26,8 @@ const combine = async (values) =>
 // Reduce function:
 // Receives a key and all values associated with that key.
 // Should return a aggregated value for the key.
-const reduce = async (key, values) => values.length; // count occurrences of each word
+const reduce = async (key, values) =>
+    values.reduce((sum, val) => sum + val, 0); // count occurrences of each word
 
 // Optional Sort function:
 // Enabled only with --sort. Receives the full list of [key, value] pairs after reduction.
