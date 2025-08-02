@@ -10,7 +10,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_stream::wrappers::LinesStream;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -125,6 +125,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     #[instrument(level = "trace")]
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = num_cpus::get().max(1);
+        info!("Starting pulsar engine with {} CPU workers", n_cpus);
         let mut workers = Vec::with_capacity(n_cpus);
         for idx in 0..n_cpus {
             let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(64);
@@ -136,6 +137,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 return Err(e.into());
             }
         }
+        info!("Successfully started {} JS VM workers", n_cpus);
 
         // aggregate map results
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
@@ -148,8 +150,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
             let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
             const FLUSH_THRESHOLD: usize = 10_000;
+            let mut total_processed = 0;
 
             while let Some(kvs) = map_rx.recv().await {
+                let batch_size = kvs.len();
+                total_processed += batch_size;
                 for kv in kvs {
                     let _ = hashmap
                         .entry(kv.key.clone())
@@ -158,7 +163,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 }
 
                 if hashmap.len() >= FLUSH_THRESHOLD {
-                    info!("Flushing {} entries to DB", hashmap.len());
+                    info!(
+                        "Flushing {} entries to DB, total processed: {}",
+                        hashmap.len(),
+                        total_processed
+                    );
                     // Batch insert
                     let mut batch = sled::Batch::default();
                     for (key, mut values) in hashmap.drain() {
@@ -186,7 +195,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
             // Flush any remaining entries
             if !hashmap.is_empty() {
-                info!("Final flush of {} entries to DB", hashmap.len());
+                info!(
+                    "Final flush of {} entries to DB, total processed: {}",
+                    hashmap.len(),
+                    total_processed
+                );
                 let mut batch = sled::Batch::default();
                 for (key, mut values) in hashmap.drain() {
                     let mut all_values = match groups_db.get(&key)? {
@@ -208,10 +221,15 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 }
                 groups_db.apply_batch(batch)?;
             }
+            info!(
+                "Group phase completed, total key-value pairs processed: {}",
+                total_processed
+            );
             Ok(groups_db)
         });
 
         // map phase
+        info!("Starting map phase");
         let task_idx = AtomicUsize::new(0);
         LinesStream::new(self.reader.lines())
             .filter_map(
@@ -229,13 +247,18 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
+                            tracing::debug!(
+                                "Map task {} completed with {} results",
+                                idx,
+                                output.len()
+                            );
                             let _ = map_tx.send(output).await;
                         }
                         Ok(JobResult::Error(e)) => {
-                            error!("Error during map: {}", e);
+                            error!("Error during map task {}: {}", idx, e);
                         }
                         Err(e) => {
-                            error!("JS worker error: {}", e);
+                            error!("JS worker error in task {}: {}", idx, e);
                         }
                         _ => unreachable!(),
                     };
@@ -244,29 +267,47 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             .await;
 
         // group phase
+        info!("Map phase completed, starting group phase");
         drop(map_tx);
         let groups = map_consumer.await?.unwrap();
+        info!(
+            "Group phase completed, {} total keys in database",
+            groups.len()
+        );
 
         // aggregate reduce results
+        info!("Starting reduce result aggregation phase");
         let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(64);
         let reduce_consumer = tokio::spawn({
             let output_format = self.output_format.clone();
             let sort = self.sort;
             let worker = workers[0].clone();
             async move {
+                info!("Starting output writer task");
                 let stdout = tokio::io::stdout();
                 let mut writer = BufWriter::new(stdout);
+                let mut result_count = 0;
 
                 if sort {
+                    info!("Collecting results for sorting");
                     let mut results = Vec::new();
                     while let Some(kv) = reduce_rx.recv().await {
                         results.push(kv);
+                        result_count += 1;
                     }
+                    info!(
+                        "Collected {} results, starting sort operation",
+                        result_count
+                    );
 
                     let (resp_tx, resp_rx) = oneshot::channel();
                     let _ = worker.send(JobRequest::Sort(results, resp_tx)).await;
                     match resp_rx.await {
                         Ok(JobResult::SortSuccess(output)) => {
+                            info!(
+                                "Sort operation completed, writing {} sorted results",
+                                output.len()
+                            );
                             for kv in output {
                                 Self::format_and_print_result(
                                     &kv.key,
@@ -280,7 +321,9 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         _ => error!("Sort error"),
                     }
                 } else {
+                    info!("Writing results without sorting");
                     while let Some(kv) = reduce_rx.recv().await {
+                        result_count += 1;
                         Self::format_and_print_result(
                             &kv.key,
                             &kv.value,
@@ -289,6 +332,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         )
                         .await;
                     }
+                    info!("Wrote {} results to output", result_count);
                 }
 
                 let _ = writer.flush().await;
@@ -296,6 +340,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         });
 
         // reduce phase
+        info!("Starting reduce phase");
         tokio_stream::iter(groups.iter()
             .filter_map(|res| {
                 match res {
@@ -330,6 +375,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
                 match resp_rx.await {
                     Ok(JobResult::ReduceSuccess(value)) => {
+                        debug!("Reduce task {} completed with {} results", idx, value.len());
                         for kv in value {
                             if let Err(e) = reduce_tx.send(kv).await {
                                 error!("Failed to send reduce result: {}", e);
@@ -338,10 +384,10 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         }
                     }
                     Ok(JobResult::Error(e)) => {
-                        error!("Error during reduce: {}", e);
+                        error!("Error during reduce task {}: {}", idx, e);
                     }
                     Err(e) => {
-                        error!("JS worker error: {}", e);
+                        error!("JS worker error in reduce task {}: {}", idx, e);
                     }
                     _ => unreachable!(),
                 };
@@ -350,13 +396,16 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         .await;
 
         // write results
+        info!("Reduce phase completed, waiting for output");
         drop(reduce_tx);
         let _ = reduce_consumer.await;
+        info!("Pulsar processing completed successfully");
 
         Ok(())
     }
 
     /// Format and print a single result
+    #[instrument(level = "trace", skip(writer))]
     async fn format_and_print_result(
         key: &str,
         result: &js::Value,
