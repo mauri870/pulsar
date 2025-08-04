@@ -81,10 +81,12 @@ const test = async () => {
         if (reduced !== 3) {
             throw new Error(`Reduce test failed: expected 3, got ${reduced}`);
         }
+    })();
 
-        const unsorted = [["zebra", 1], ["apple", 1], ["monkey", 1]];
+    await (async () => {
+        const unsorted = [["zebra", 1], ["apple", 2], ["monkey", 3]];
         const sorted = await sort([...unsorted]);
-        const sortedExpected = [["apple", 1], ["monkey", 1], ["zebra", 1]];
+        const sortedExpected = [["apple", 2], ["monkey", 3], ["zebra", 1]];
         if (str(sorted) !== str(sortedExpected)) {
             throw new Error(`Sort test failed:\nExpected: ${str(sortedExpected)}\nGot: ${str(sorted)}`);
         }
