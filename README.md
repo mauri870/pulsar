@@ -9,8 +9,7 @@ By default, if no JS script is provided, it performs a simple word count. See `d
 ## Compilation
 
 ```bash
-nvm use 22
-(cd llrt && npm i && make js)
+./build_llrt.sh
 cargo install --path=.
 ```
 
