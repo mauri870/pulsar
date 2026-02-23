@@ -7,10 +7,10 @@ if ! command -v hyperfine &> /dev/null; then
     exit 1
 fi
 
-WITH_NODE=0
+WITH_NODE=1
 for arg in "$@"; do
-  if [[ "$arg" == "--with-node" ]]; then
-    WITH_NODE=1
+  if [[ "$arg" != "--with-node" ]]; then
+    WITH_NODE=0
   fi
 done
 
