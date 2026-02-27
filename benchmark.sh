@@ -14,6 +14,9 @@ for arg in "$@"; do
   fi
 done
 
+source $NVM_DIR/nvm.sh
+nvm use 25
+
 echo ""
 [[ $WITH_NODE -eq 1 ]] && echo "NodeJS version: $(node -v)"
 echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
