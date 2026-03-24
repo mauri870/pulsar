@@ -174,10 +174,8 @@ Not very efficient, but you get the idea.
 <summary>perf.txt</summary>
 
 ```txt
-Now using node v25.7.0 (npm v11.10.1)
-
 NodeJS version: v25.7.0
-Pulsar version: pulsar 0.1.0-88bf4cc
+Pulsar version: pulsar 0.1.0-71f6331
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor 32
 
 Summary
@@ -197,21 +195,21 @@ leverage multiple threads and multiple execution contexts.
 
     Finished `release` profile [optimized] target(s) in 0.10s
 Benchmark 1: pulsar-20k-lines
-  Time (mean ± σ):     139.6 ms ±  12.5 ms    [User: 861.8 ms, System: 58.4 ms]
-  Range (min … max):   130.2 ms … 158.8 ms    5 runs
+  Time (mean ± σ):     125.1 ms ±   4.8 ms    [User: 662.3 ms, System: 41.2 ms]
+  Range (min … max):   120.0 ms … 132.2 ms    5 runs
  
 Benchmark 2: pulsar-20k-lines-sort-by-key-asc
-  Time (mean ± σ):     174.6 ms ±   4.4 ms    [User: 902.6 ms, System: 52.6 ms]
-  Range (min … max):   170.0 ms … 181.1 ms    5 runs
+  Time (mean ± σ):     155.0 ms ±   3.7 ms    [User: 696.3 ms, System: 42.3 ms]
+  Range (min … max):   149.3 ms … 158.4 ms    5 runs
  
 Benchmark 3: baseline-node-20k-lines
-  Time (mean ± σ):      5.132 s ±  0.005 s    [User: 4.756 s, System: 0.417 s]
-  Range (min … max):    5.127 s …  5.138 s    5 runs
+  Time (mean ± σ):      5.139 s ±  0.002 s    [User: 4.748 s, System: 0.432 s]
+  Range (min … max):    5.137 s …  5.142 s    5 runs
  
 Summary
   pulsar-20k-lines ran
-    1.25 ± 0.12 times faster than pulsar-20k-lines-sort-by-key-asc
-   36.75 ± 3.28 times faster than baseline-node-20k-lines
+    1.24 ± 0.06 times faster than pulsar-20k-lines-sort-by-key-asc
+   41.07 ± 1.58 times faster than baseline-node-20k-lines
 ```
 
 </details>

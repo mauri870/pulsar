@@ -41,6 +41,10 @@ pub struct Cli {
     #[arg(long = "sort", action = clap::ArgAction::SetTrue)]
     sort: bool,
 
+    /// Number of parallel JS VM workers. Defaults to the number of logical CPUs.
+    #[arg(short = 'j', long = "workers")]
+    workers: Option<usize>,
+
     /// Run in test mode, executing the script against test cases.
     #[arg(long = "test", action = clap::ArgAction::SetTrue)]
     test: bool,
@@ -68,6 +72,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     sort: bool,
     output_format: OutputFormat,
     test: bool,
+    workers: usize,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -96,12 +101,14 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             // Use default word count script
             DEFAULT_SCRIPT.into()
         };
+        let workers = cli.workers.unwrap_or_else(num_cpus::get_physical).max(1);
         Ok(Pulsar {
             reader,
             script: script.clone(),
             output_format: cli.output_format,
             sort: cli.sort,
             test: cli.test,
+            workers,
         })
     }
 
@@ -124,7 +131,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
     #[instrument(level = "trace")]
     pub async fn run_engine(self) -> Result<()> {
-        let n_cpus = num_cpus::get().max(1);
+        let n_cpus = self.workers;
         info!("Starting pulsar engine with {} CPU workers", n_cpus);
         let mut workers = Vec::with_capacity(n_cpus);
         for idx in 0..n_cpus {
