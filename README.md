@@ -174,8 +174,10 @@ Not very efficient, but you get the idea.
 <summary>perf.txt</summary>
 
 ```txt
+Now using node v25.7.0 (npm v11.10.1)
+
 NodeJS version: v25.7.0
-Pulsar version: pulsar 0.1.0-4f30d2d
+Pulsar version: pulsar 0.1.0-88bf4cc
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor 32
 
 Summary
@@ -193,23 +195,23 @@ single thread. Remember, concurrency is not parallelism.
 Pulsar, on the other hand, is a highly parallel MapReduce engine and can
 leverage multiple threads and multiple execution contexts.
 
-    Finished `release` profile [optimized] target(s) in 0.09s
+    Finished `release` profile [optimized] target(s) in 0.10s
 Benchmark 1: pulsar-20k-lines
-  Time (mean ± σ):     126.1 ms ±   8.9 ms    [User: 843.8 ms, System: 49.4 ms]
-  Range (min … max):   111.7 ms … 133.2 ms    5 runs
-
+  Time (mean ± σ):     139.6 ms ±  12.5 ms    [User: 861.8 ms, System: 58.4 ms]
+  Range (min … max):   130.2 ms … 158.8 ms    5 runs
+ 
 Benchmark 2: pulsar-20k-lines-sort-by-key-asc
-  Time (mean ± σ):     150.4 ms ±   5.8 ms    [User: 854.7 ms, System: 47.8 ms]
-  Range (min … max):   142.1 ms … 156.0 ms    5 runs
-
+  Time (mean ± σ):     174.6 ms ±   4.4 ms    [User: 902.6 ms, System: 52.6 ms]
+  Range (min … max):   170.0 ms … 181.1 ms    5 runs
+ 
 Benchmark 3: baseline-node-20k-lines
-  Time (mean ± σ):      5.134 s ±  0.004 s    [User: 4.627 s, System: 0.561 s]
-  Range (min … max):    5.131 s …  5.138 s    5 runs
-
+  Time (mean ± σ):      5.132 s ±  0.005 s    [User: 4.756 s, System: 0.417 s]
+  Range (min … max):    5.127 s …  5.138 s    5 runs
+ 
 Summary
   pulsar-20k-lines ran
-    1.19 ± 0.10 times faster than pulsar-20k-lines-sort-by-key-asc
-   40.73 ± 2.87 times faster than baseline-node-20k-lines
+    1.25 ± 0.12 times faster than pulsar-20k-lines-sort-by-key-asc
+   36.75 ± 3.28 times faster than baseline-node-20k-lines
 ```
 
 </details>
