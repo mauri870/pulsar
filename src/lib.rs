@@ -18,6 +18,16 @@ use std::fmt::{Debug, Display};
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
+
+fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut values: Vec<js::Value> = old_value
+        .and_then(|bytes| deserialize(bytes).ok())
+        .unwrap_or_default();
+    let new_values: Vec<js::Value> = deserialize(new_bytes).unwrap_or_default();
+    values.extend(new_values);
+    serialize(&values).ok()
+}
+
 const DEFAULT_CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Parser)]
@@ -182,6 +192,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 .temporary(true)
                 .cache_capacity(64 * 1024 * 1024) // 64MB
                 .open()?;
+            groups_db.set_merge_operator(merge_values);
 
             let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
             const FLUSH_THRESHOLD: usize = 10_000;
@@ -203,28 +214,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         hashmap.len(),
                         total_processed
                     );
-                    // Batch insert
-                    let mut batch = sled::Batch::default();
-                    for (key, mut values) in hashmap.drain() {
-                        // Merge with existing values
-                        let mut all_values = match groups_db.get(&key)? {
-                            Some(raw_bytes) => {
-                                deserialize::<Vec<js::Value>>(&raw_bytes).unwrap_or_else(|e| {
-                                    error!(
-                                        "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
-                                        &key,
-                                        e
-                                    );
-                                    Vec::new()
-                                })
-                            }
-                            None => Vec::new(),
-                        };
-                        all_values.append(&mut values);
-                        let updated_value_bytes = serialize(&all_values)?;
-                        batch.insert(key.as_bytes(), updated_value_bytes);
+                    for (key, values) in hashmap.drain() {
+                        let values_bytes = serialize(&values)
+                            .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+                        groups_db.merge(key.as_bytes(), values_bytes)?;
                     }
-                    groups_db.apply_batch(batch)?;
                 }
             }
 
@@ -235,26 +229,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     hashmap.len(),
                     total_processed
                 );
-                let mut batch = sled::Batch::default();
-                for (key, mut values) in hashmap.drain() {
-                    let mut all_values = match groups_db.get(&key)? {
-                        Some(raw_bytes) => {
-                            deserialize::<Vec<js::Value>>(&raw_bytes).unwrap_or_else(|e| {
-                                error!(
-                                    "Failed to deserialize existing DB value for key '{:?}': {}. Discarding corrupted data.",
-                                    &key,
-                                    e
-                                );
-                                Vec::new()
-                            })
-                        }
-                        None => Vec::new(),
-                    };
-                    all_values.append(&mut values);
-                    let updated_value_bytes = serialize(&all_values)?;
-                    batch.insert(key.as_bytes(), updated_value_bytes);
+                for (key, values) in hashmap.drain() {
+                    let values_bytes = serialize(&values)
+                        .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+                    groups_db.merge(key.as_bytes(), values_bytes)?;
                 }
-                groups_db.apply_batch(batch)?;
             }
             info!(
                 "Group phase completed, total key-value pairs processed: {}",

@@ -377,8 +377,6 @@ EOF
 
   run "$BIN" -s "$SCRIPTFILE" --test
   [ "$status" -eq 1 ]
-
-  diag "$output"
   [[ "$output" =~ "Error: Test failed!" ]]
 
   rm -rf "$TMPDIR"
