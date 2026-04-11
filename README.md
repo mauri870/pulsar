@@ -1,12 +1,59 @@
 # pulsar
 
-`pulsar` is a high-performance MapReduce engine for processing large datasets using user-defined JavaScript functions.
+`pulsar` is a high-performance MapReduce engine for processing large datasets using user-defined JavaScript functions. It follows the standard Unix philosophy, reads from stdin or a file, writes to stdout, and composes naturally with other tools via pipes.
 
-Features include parallel processing powered by Tokio, robust JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine (based on [QuickJS](https://github.com/DelSkayn/rquickjs)), streaming, NDJSON output, and sorting.
+Features include ES2023 JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine based on [QuickJS](https://bellard.org/quickjs/), work-stealing scheduler, streaming input/output, automatically spills to disk if intermediate data is too large, NDJSON output, sorting and an embedded test runner.
 
-By default, if no JS script is provided, it performs a simple word count. See `default_script.js` for the default behavior and available options.
+Define `map`, `combine`, `reduce`, `sort`, and `test` as async functions in your script. The engine handles parallelism, chunking, grouping, and orchestration. In the diagrams below, lighter sections represent your script and darker sections represent the engine:
+
+```mermaid
+flowchart LR
+  classDef engine fill:#000000,stroke:#fff,color:#fff
+  subgraph pulsar["Pulsar"]
+    direction TB
+    pi([Input]) --> ch
+    ch([Chunking]) --> sched
+    subgraph sched["Scheduler"]
+      direction LR
+      subgraph w1["Thread 1 (JS VM)"]
+        mc1["map / combine"]
+      end
+      subgraph w2["Thread 2 (JS VM)"]
+        mc2["map / combine"]
+      end
+      subgraph wn["Thread N (JS VM)"]
+        mcn["map / combine"]
+      end
+      mc1 ~~~ mc2 ~~~ mcn
+    end
+    sched --> group["Group"] --> reduce["reduce"] --> sort["Sort (optional)"] --> po([Output])
+  end
+
+  subgraph nodejs["NodeJS"]
+    direction TB
+    ni([Input]) --> evloop
+    subgraph evloop["Event Loop (single thread)"]
+      nmap["read, map, accumulate, reduce"]
+    end
+    evloop --> no([Output])
+  end
+
+  class sched engine
+  class evloop engine
+  class w1,w2,wn engine
+
+  pulsar ~~~ nodejs
+
+  classDef userCode fill:#d4edda,stroke:#28a745,color:#000
+  class mc1,mc2,mcn,reduce,sort userCode
+  class nmap userCode
+```
+
+On CPU-bound parallelizable workloads, `pulsar` is upwards of 43x faster than Node.js, see [perf](#performance) section. By default, if no script is provided, it performs a simple word count. See [`default_script.js`](./default_script.js) for an example implementation.
 
 ## Compilation
+
+Requires Rust, nvm, NodeJS.
 
 ```bash
 ./build_llrt.sh
@@ -17,9 +64,13 @@ cargo install --path=.
 
 ```bash
 pulsar -f input_file -s script_file
+pulsar -h
 ```
 
 ## Examples
+
+<details>
+<summary>Open list of examples</summary>
 
 ### Word Count (Default)
 
@@ -168,6 +219,8 @@ $ killall socat
 
 Not very efficient, but you get the idea.
 
+</details>
+
 ## Performance
 
 <details>
@@ -185,7 +238,7 @@ copy of the Moby Dick by Herman Melville.
 
 Each line is processed by the map function, which introduces an artificial
 delay with jitter (0.05–0.45 ms per line, uniform random) to simulate
-variable processing times and exercise the work-stealing scheduler.
+variable processing times.
 
 It compares Pulsar against a NodeJS equivalent implementation. Both
 versions are asynchronous but, due to the nature of NodeJS, it runs on a
@@ -246,7 +299,7 @@ Benchmark 3 (3 runs): node node-script.js input.txt
 
 Each script can define a `async function test()` that will be executed when running the `pulsar` command with the `--test` flag.
 
-For pulsar itself, there is a very modest test suite that you can run with [bats](https://github.com/bats-core/bats-core):
+For pulsar itself, there is an integration test suite that you can run with [bats](https://github.com/bats-core/bats-core):
 
 ```bash
 bats tests

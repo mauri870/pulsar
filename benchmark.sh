@@ -30,8 +30,8 @@ This benchmark performs a simple word count aggregation on a 20,000-line
 copy of the Moby Dick by Herman Melville.
 
 Each line is processed by the map function, which introduces an artificial
-delay with jitter (0.05–0.45 ms per line, uniform random) to simulate
-variable processing times and exercise the work-stealing scheduler.
+delay with jitter (0.05-0.45 ms per line, uniform random) to simulate
+variable processing times of a real workload.
 
 EOF
 
