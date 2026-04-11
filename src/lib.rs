@@ -48,6 +48,10 @@ pub struct Cli {
     /// Run in test mode, executing the script against test cases.
     #[arg(long = "test", action = clap::ArgAction::SetTrue)]
     test: bool,
+
+    /// Enable CPU profiling; writes pprof.pb to the working directory on exit.
+    #[arg(long = "pprof", action = clap::ArgAction::SetTrue)]
+    pub pprof: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default)]
@@ -73,6 +77,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     output_format: OutputFormat,
     test: bool,
     workers: usize,
+    pprof_guard: Option<pprof2::ProfilerGuard<'static>>,
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
@@ -109,6 +114,11 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             sort: cli.sort,
             test: cli.test,
             workers,
+            pprof_guard: if cli.pprof {
+                Some(pprof2::ProfilerGuard::new(999).unwrap())
+            } else {
+                None
+            },
         })
     }
 
@@ -119,7 +129,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             return self.run_tests().await;
         }
 
-        self.run_engine().await
+        self.run_engine().await?;
+        Ok(())
     }
 
     #[instrument(level = "trace")]
@@ -407,6 +418,18 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         drop(reduce_tx);
         let _ = reduce_consumer.await;
         info!("Pulsar processing completed successfully");
+
+        if let Some(guard) = self.pprof_guard {
+            if let Ok(report) = guard.report().build() {
+                use pprof2::protos::Message;
+                use std::io::Write;
+                let profile = report.pprof()?;
+                let mut content = Vec::new();
+                profile.encode(&mut content)?;
+                let mut file = std::fs::File::create("pprof.pb")?;
+                file.write_all(&content)?;
+            }
+        }
 
         Ok(())
     }
