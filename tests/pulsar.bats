@@ -348,3 +348,38 @@ EOF
 
   rm -rf "$TMPDIR"
 }
+
+@test "pulsar test default script" {
+  TMPDIR=$(mktemp -d)
+  OUTFILE="$TMPDIR/out.txt"
+
+  "$BIN" --test > "$OUTFILE"
+
+  run cat "$OUTFILE"
+  [ "$status" -eq 0 ]
+
+  [[ "$output" =~ 'OK' ]]
+
+  rm -rf "$TMPDIR"
+}
+
+@test "pulsar test fails on assertion error" {
+  TMPDIR=$(mktemp -d)
+  SCRIPTFILE="$TMPDIR/script.js"
+
+  cat > "$SCRIPTFILE" << 'EOF'
+const map = async (line) => {};
+const reduce = async (key, values) => {};
+const test = async () => {
+  throw new Error("Test failed!");
+};
+EOF
+
+  run "$BIN" -s "$SCRIPTFILE" --test
+  [ "$status" -eq 1 ]
+
+  diag "$output"
+  [[ "$output" =~ "Error: Test failed!" ]]
+
+  rm -rf "$TMPDIR"
+}
