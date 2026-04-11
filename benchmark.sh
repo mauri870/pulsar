@@ -104,9 +104,11 @@ const doWork = async () => {
 (async () => {
   const rl = createReader(inputStream);
 
+  promises = [];
   for await (const line of rl) {
-    await processLine(line);
+    promises.push(processLine(line));
   }
+  await Promise.all(promises);
 
   for (const [word, count] of wordCounts) {
     console.log(`${word}: ${count}`);

@@ -223,7 +223,7 @@ Not very efficient, but you get the idea.
 
 ## Performance
 
-On latency-bound parallelizable workloads, `pulsar` is upwards of 75x faster than Node.js, the benchmark bellow. On more CPU intensive tasks, it can be up to 1.5x faster, but will use much more memory and cpu for the same task.
+On latency-bound parallelizable workloads, `pulsar` is 1.3x faster than Node.js, see the benchmark bellow. 
 
 <details>
 <summary>perf.txt</summary>
@@ -231,7 +231,7 @@ On latency-bound parallelizable workloads, `pulsar` is upwards of 75x faster tha
 ```txt
 
 NodeJS version: v25.7.0
-Pulsar version: 0.1.0-ea67cb8
+Pulsar version: 0.1.0-bb2d25e
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor 32
 
 Summary
@@ -250,50 +250,51 @@ single thread. Remember, concurrency is not parallelism.
 Pulsar, on the other hand, is a highly parallel MapReduce engine and can
 leverage multiple threads and multiple execution contexts.
 
-    Finished `release` profile [optimized] target(s) in 0.07s
+   Compiling pulsar v0.1.0 (/home/mauri870/git/pulsar)
+    Finished `release` profile [optimized] target(s) in 1.51s
 Benchmark 1: pulsar-20k-lines
-  Time (mean ± σ):      72.0 ms ±   2.3 ms    [User: 616.9 ms, System: 33.7 ms]
-  Range (min … max):    69.1 ms …  74.7 ms    5 runs
+  Time (mean ± σ):      73.4 ms ±   4.3 ms    [User: 614.3 ms, System: 35.3 ms]
+  Range (min … max):    69.5 ms …  79.9 ms    5 runs
  
 Benchmark 2: pulsar-20k-lines-sort-by-key-asc
-  Time (mean ± σ):     111.3 ms ±   4.4 ms    [User: 652.5 ms, System: 30.0 ms]
-  Range (min … max):   104.8 ms … 116.2 ms    5 runs
+  Time (mean ± σ):     111.0 ms ±   3.5 ms    [User: 657.8 ms, System: 32.9 ms]
+  Range (min … max):   106.7 ms … 116.2 ms    5 runs
  
 Benchmark 3: baseline-node-20k-lines
-  Time (mean ± σ):      5.567 s ±  0.014 s    [User: 5.172 s, System: 0.462 s]
-  Range (min … max):    5.546 s …  5.580 s    5 runs
+  Time (mean ± σ):      90.3 ms ±   2.0 ms    [User: 107.0 ms, System: 18.9 ms]
+  Range (min … max):    87.4 ms …  92.4 ms    5 runs
  
 Summary
   pulsar-20k-lines ran
-    1.55 ± 0.08 times faster than pulsar-20k-lines-sort-by-key-asc
-   77.34 ± 2.48 times faster than baseline-node-20k-lines
-Benchmark 1 (70 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js
+    1.23 ± 0.08 times faster than baseline-node-20k-lines
+    1.51 ± 0.10 times faster than pulsar-20k-lines-sort-by-key-asc
+Benchmark 1 (68 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          71.6ms ± 4.07ms    61.4ms … 80.6ms          0 ( 0%)        0%
-  peak_rss            253MB ± 2.21MB     247MB …  257MB          1 ( 1%)        0%
-  cpu_cycles         3.26G  ± 28.7M     3.21G  … 3.36G           1 ( 1%)        0%
-  instructions       10.5G  ± 9.42M     10.5G  … 10.5G           0 ( 0%)        0%
-  cache_references    129M  ± 1.47M      125M  …  135M           1 ( 1%)        0%
-  cache_misses       6.24M  ±  103K     6.02M  … 6.50M           1 ( 1%)        0%
-  branch_misses      5.35M  ± 39.1K     5.26M  … 5.44M           0 ( 0%)        0%
+  wall_time          73.7ms ± 3.40ms    66.4ms … 80.9ms          0 ( 0%)        0%
+  peak_rss            253MB ± 3.08MB     246MB …  259MB          3 ( 4%)        0%
+  cpu_cycles         3.23G  ± 22.3M     3.17G  … 3.28G           1 ( 1%)        0%
+  instructions       10.5G  ± 10.0M     10.5G  … 10.5G           2 ( 3%)        0%
+  cache_references    128M  ±  942K      126M  …  131M           4 ( 6%)        0%
+  cache_misses       5.83M  ± 77.7K     5.69M  … 6.03M           0 ( 0%)        0%
+  branch_misses      5.30M  ± 37.4K     5.21M  … 5.39M           0 ( 0%)        0%
 Benchmark 2 (46 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js --sort
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           110ms ± 3.77ms     100ms …  119ms          1 ( 2%)        💩+ 54.1% ±  2.1%
-  peak_rss            267MB ± 6.49MB     256MB …  285MB          5 (11%)        💩+  5.5% ±  0.7%
-  cpu_cycles         3.57G  ±  199M     3.36G  … 4.03G           0 ( 0%)        💩+  9.7% ±  1.5%
-  instructions       11.3G  ±  169M     11.1G  … 11.7G           0 ( 0%)        💩+  8.0% ±  0.4%
-  cache_references    133M  ± 1.95M      130M  …  139M           3 ( 7%)        💩+  2.7% ±  0.5%
-  cache_misses       6.87M  ±  819K     6.27M  … 9.64M           2 ( 4%)        💩+ 10.2% ±  3.1%
-  branch_misses      6.15M  ±  278K     5.87M  … 7.22M           1 ( 2%)        💩+ 14.9% ±  1.2%
-Benchmark 3 (3 runs): node node-script.js input.txt
+  wall_time           109ms ± 3.62ms    98.4ms …  116ms          2 ( 4%)        💩+ 47.6% ±  1.8%
+  peak_rss            265MB ± 5.02MB     255MB …  279MB          2 ( 4%)        💩+  4.9% ±  0.6%
+  cpu_cycles         3.52G  ±  170M     3.35G  … 3.97G           3 ( 7%)        💩+  9.0% ±  1.3%
+  instructions       11.3G  ±  144M     11.1G  … 11.6G           0 ( 0%)        💩+  8.0% ±  0.3%
+  cache_references    131M  ± 1.81M      129M  …  138M           3 ( 7%)        💩+  2.1% ±  0.4%
+  cache_misses       6.25M  ±  658K     5.81M  … 9.10M           9 (20%)        💩+  7.1% ±  2.7%
+  branch_misses      6.04M  ±  227K     5.84M  … 6.91M           4 ( 9%)        💩+ 14.2% ±  1.0%
+Benchmark 3 (56 runs): node node-script.js input.txt
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          5.59s  ± 18.2ms    5.57s  … 5.61s           0 ( 0%)        💩+7706.7% ±  8.3%
-  peak_rss           76.1MB ± 10.5MB    64.1MB … 83.0MB          0 ( 0%)        ⚡- 69.9% ±  1.3%
-  cpu_cycles         27.3G  ±  147M     27.1G  … 27.4G           0 ( 0%)        💩+738.8% ±  1.4%
-  instructions       87.5G  ±  346M     87.1G  … 87.8G           0 ( 0%)        💩+734.7% ±  0.7%
-  cache_references   7.32G  ±  103M     7.20G  … 7.39G           0 ( 0%)        💩+5566.8% ± 15.8%
-  cache_misses       25.5M  ± 7.46M     17.1M  … 31.4M           0 ( 0%)        💩+308.0% ± 23.7%
-  branch_misses      16.3M  ±  346K     15.9M  … 16.6M           0 ( 0%)        💩+204.5% ±  1.5%
+  wall_time          89.9ms ± 4.23ms    84.5ms …  103ms          7 (13%)        💩+ 22.0% ±  1.8%
+  peak_rss            102MB ±  691KB     100MB …  104MB          0 ( 0%)        ⚡- 59.7% ±  0.3%
+  cpu_cycles          618M  ± 26.5M      590M  …  723M           4 ( 7%)        ⚡- 80.9% ±  0.3%
+  instructions       1.46G  ± 21.6M     1.42G  … 1.54G           2 ( 4%)        ⚡- 86.1% ±  0.1%
+  cache_references   53.8M  ±  965K     52.1M  … 56.2M           0 ( 0%)        ⚡- 58.1% ±  0.3%
+  cache_misses       4.58M  ±  163K     4.40M  … 5.30M           2 ( 4%)        ⚡- 21.5% ±  0.8%
+  branch_misses      4.50M  ±  209K     4.19M  … 5.05M           0 ( 0%)        ⚡- 15.0% ±  1.0%
 ```
 
 </details>
