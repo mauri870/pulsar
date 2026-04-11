@@ -18,7 +18,7 @@ use std::fmt::{Debug, Display};
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
-const CHUNK_SIZE: usize = 64;
+const DEFAULT_CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
@@ -49,6 +49,10 @@ pub struct Cli {
     #[arg(long = "test", action = clap::ArgAction::SetTrue)]
     test: bool,
 
+    /// Number of lines per chunk sent to each worker.
+    #[arg(short = 'c', long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
+    chunk_size: usize,
+
     /// Enable CPU profiling; writes pprof.pb to the working directory on exit.
     #[arg(long = "pprof", action = clap::ArgAction::SetTrue)]
     pub pprof: bool,
@@ -77,6 +81,7 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     output_format: OutputFormat,
     test: bool,
     workers: usize,
+    chunk_size: usize,
     pprof_guard: Option<pprof2::ProfilerGuard<'static>>,
 }
 
@@ -114,6 +119,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             sort: cli.sort,
             test: cli.test,
             workers,
+            chunk_size: cli.chunk_size.max(1),
             pprof_guard: if cli.pprof {
                 Some(pprof2::ProfilerGuard::new(999).unwrap())
             } else {
@@ -144,7 +150,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = self.workers;
         info!("Starting pulsar engine with {} CPU workers", n_cpus);
-        let (worker_tx, worker_rx) = flume::bounded(64);
+        let (worker_tx, worker_rx) = flume::bounded(self.chunk_size);
         let mut init_rxs = Vec::with_capacity(n_cpus);
 
         for idx in 0..n_cpus {
@@ -169,7 +175,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         info!("Successfully started {} JS VM workers", n_cpus);
 
         // aggregate map results
-        let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(64);
+        let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(self.chunk_size);
         let map_consumer: JoinHandle<Result<sled::Db>> = tokio::spawn(async move {
             let groups_db = sled::Config::default()
                 .path("pulsar_groups")
@@ -264,7 +270,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             .filter_map(
                 |r| async move { r.map_err(|e| eprintln!("Error reading line: {}", e)).ok() },
             )
-            .chunks(CHUNK_SIZE)
+            .chunks(self.chunk_size)
             .for_each_concurrent(n_cpus, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let worker_tx = worker_tx.clone();
@@ -306,7 +312,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // aggregate reduce results
         info!("Starting reduce result aggregation phase");
-        let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(64);
+        let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(self.chunk_size);
         let reduce_consumer = tokio::spawn({
             let output_format = self.output_format.clone();
             let sort = self.sort;
@@ -392,7 +398,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                 });
                 (key, values)
         }))
-        .chunks(CHUNK_SIZE)
+        .chunks(self.chunk_size)
         .for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
             let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let worker_tx = worker_tx.clone();
