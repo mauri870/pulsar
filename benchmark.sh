@@ -15,11 +15,11 @@ for arg in "$@"; do
 done
 
 source $NVM_DIR/nvm.sh
-nvm use 25
+nvm use 25 > /dev/null
 
 echo ""
 [[ $WITH_NODE -eq 1 ]] && echo "NodeJS version: $(node -v)"
-echo "Pulsar version: $(./target/release/pulsar --version)-$(git rev-parse --short HEAD)"
+echo "Pulsar version: $(./target/release/pulsar --version | cut -d' ' -f2)-$(git rev-parse --short HEAD)"
 echo "CPU: $(lscpu | grep 'Model name' | sed 's/Model name:\s*//') $(lscpu | grep 'CPU(s):' | head -1 | sed 's/CPU(s):\s*//')"
 echo ""
 

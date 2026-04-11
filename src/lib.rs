@@ -174,7 +174,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             let groups_db = sled::Config::default()
                 .path("pulsar_groups")
                 .temporary(true)
-                .cache_capacity(2 * 1024 * 1024 * 1024) // 2GB
+                .cache_capacity(64 * 1024 * 1024) // 64MB
                 .open()?;
 
             let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();

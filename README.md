@@ -175,7 +175,7 @@ Not very efficient, but you get the idea.
 
 ```txt
 NodeJS version: v25.7.0
-Pulsar version: pulsar 0.1.0-8e99e45
+Pulsar version: pulsar 0.1.0-3c74d3e
 CPU: AMD Ryzen 9 9950X3D 16-Core Processor 32
 
 Summary
@@ -185,7 +185,7 @@ copy of the Moby Dick by Herman Melville.
 
 Each line is processed by the map function, which introduces an artificial
 delay with jitter (0.05–0.45 ms per line, uniform random) to simulate
-variable processing times.
+variable processing times and exercise the work-stealing scheduler.
 
 It compares Pulsar against a NodeJS equivalent implementation. Both
 versions are asynchronous but, due to the nature of NodeJS, it runs on a
@@ -194,50 +194,50 @@ single thread. Remember, concurrency is not parallelism.
 Pulsar, on the other hand, is a highly parallel MapReduce engine and can
 leverage multiple threads and multiple execution contexts.
 
-    Finished `release` profile [optimized] target(s) in 0.09s
+    Finished `release` profile [optimized] target(s) in 0.07s
 Benchmark 1: pulsar-20k-lines
-  Time (mean ± σ):     130.7 ms ±   6.5 ms    [User: 675.0 ms, System: 44.0 ms]
-  Range (min … max):   121.1 ms … 136.9 ms    5 runs
+  Time (mean ± σ):     128.9 ms ±   9.7 ms    [User: 681.2 ms, System: 52.9 ms]
+  Range (min … max):   119.2 ms … 141.0 ms    5 runs
  
 Benchmark 2: pulsar-20k-lines-sort-by-key-asc
-  Time (mean ± σ):     167.6 ms ±   8.3 ms    [User: 755.3 ms, System: 48.0 ms]
-  Range (min … max):   159.0 ms … 177.5 ms    5 runs
+  Time (mean ± σ):     163.0 ms ±   5.0 ms    [User: 777.6 ms, System: 53.5 ms]
+  Range (min … max):   159.5 ms … 171.4 ms    5 runs
  
 Benchmark 3: baseline-node-20k-lines
-  Time (mean ± σ):      5.604 s ±  0.029 s    [User: 5.230 s, System: 0.436 s]
-  Range (min … max):    5.574 s …  5.635 s    5 runs
+  Time (mean ± σ):      5.607 s ±  0.017 s    [User: 5.194 s, System: 0.479 s]
+  Range (min … max):    5.584 s …  5.627 s    5 runs
  
 Summary
   pulsar-20k-lines ran
-    1.28 ± 0.09 times faster than pulsar-20k-lines-sort-by-key-asc
-   42.89 ± 2.13 times faster than baseline-node-20k-lines
+    1.26 ± 0.10 times faster than pulsar-20k-lines-sort-by-key-asc
+   43.49 ± 3.29 times faster than baseline-node-20k-lines
 Benchmark 1 (38 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           132ms ± 7.71ms     115ms …  144ms          4 (11%)        0%
-  peak_rss            349MB ± 3.90MB     336MB …  358MB          1 ( 3%)        0%
-  cpu_cycles         3.64G  ± 58.0M     3.52G  … 3.86G           4 (11%)        0%
-  instructions       11.1G  ± 59.4M     11.1G  … 11.5G           4 (11%)        0%
-  cache_references    157M  ± 1.26M      155M  …  160M           0 ( 0%)        0%
-  cache_misses       10.7M  ±  181K     10.2M  … 11.0M           0 ( 0%)        0%
-  branch_misses      7.98M  ±  112K     7.83M  … 8.48M           2 ( 5%)        0%
-Benchmark 2 (31 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js --sort
+  wall_time           132ms ± 9.21ms                               116ms …  149ms                                    0 ( 0%)        0%
+  peak_rss            109MB ± 2.73MB                               104MB …  115MB                                    0 ( 0%)        0%
+  cpu_cycles         3.66G  ± 69.9M                               3.55G  … 3.89G                                     1 ( 3%)        0%
+  instructions       11.2G  ± 58.0M                               11.1G  … 11.3G                                     7 (18%)        0%
+  cache_references    158M  ± 1.83M                                154M  …  161M                                     0 ( 0%)        0%
+  cache_misses       11.0M  ±  286K                               10.5M  … 11.5M                                     0 ( 0%)        0%
+  branch_misses      8.14M  ± 82.6K                               7.98M  … 8.35M                                     0 ( 0%)        0%
+Benchmark 2 (30 runs): ./target/release/pulsar -f input.txt -s pulsar-script.js --sort
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           164ms ± 8.43ms     148ms …  176ms          0 ( 0%)        💩+ 23.7% ±  2.9%
-  peak_rss            362MB ± 4.13MB     354MB …  370MB          0 ( 0%)        💩+  3.9% ±  0.6%
-  cpu_cycles         4.02G  ±  144M     3.76G  … 4.27G           0 ( 0%)        💩+ 10.5% ±  1.4%
-  instructions       12.0G  ±  121M     11.7G  … 12.2G           0 ( 0%)        💩+  7.6% ±  0.4%
-  cache_references    160M  ± 2.05M      157M  …  164M           0 ( 0%)        💩+  1.9% ±  0.5%
-  cache_misses       11.2M  ±  689K     10.3M  … 12.9M           0 ( 0%)        💩+  5.1% ±  2.2%
-  branch_misses      8.66M  ±  188K     8.31M  … 9.08M           0 ( 0%)        💩+  8.4% ±  0.9%
+  wall_time           170ms ± 8.59ms                               158ms …  189ms                                    0 ( 0%)        💩+ 28.5% ±  3.3%
+  peak_rss            124MB ± 7.12MB                               116MB …  156MB                                    1 ( 3%)        💩+ 13.5% ±  2.3%
+  cpu_cycles         4.09G  ±  164M                               3.74G  … 4.36G                                     0 ( 0%)        💩+ 11.7% ±  1.6%
+  instructions       12.0G  ±  156M                               11.7G  … 12.3G                                     3 (10%)        💩+  7.9% ±  0.5%
+  cache_references    162M  ± 2.10M                                158M  …  168M                                     1 ( 3%)        💩+  2.9% ±  0.6%
+  cache_misses       11.7M  ±  804K                               10.7M  … 13.2M                                     0 ( 0%)        💩+  6.2% ±  2.5%
+  branch_misses      8.87M  ±  217K                               8.51M  … 9.45M                                     0 ( 0%)        💩+  9.1% ±  0.9%
 Benchmark 3 (3 runs): node node-script.js input.txt
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          5.59s  ± 17.2ms    5.57s  … 5.60s           0 ( 0%)        💩+4123.8% ±  7.8%
-  peak_rss           81.5MB ±  814KB    80.6MB … 82.3MB          0 ( 0%)        ⚡- 76.7% ±  1.3%
-  cpu_cycles         27.8G  ±  218M     27.5G  … 27.9G           0 ( 0%)        💩+662.8% ±  2.5%
-  instructions       87.6G  ±  989M     86.8G  … 88.7G           0 ( 0%)        💩+686.5% ±  2.5%
-  cache_references   7.35G  ±  127M     7.20G  … 7.42G           0 ( 0%)        💩+4574.5% ± 22.4%
-  cache_misses       18.2M  ±  300K     17.9M  … 18.5M           0 ( 0%)        💩+ 70.6% ±  2.2%
-  branch_misses      16.1M  ± 71.8K     16.0M  … 16.1M           0 ( 0%)        💩+101.2% ±  1.7%
+  wall_time          5.59s  ± 4.82ms                              5.58s  … 5.59s                                     0 ( 0%)        💩+4124.2% ±  8.4%
+  peak_rss           79.8MB ± 98.6KB                              79.7MB … 79.8MB                                    0 ( 0%)        ⚡- 27.0% ±  3.0%
+  cpu_cycles         27.7G  ±  226M                               27.4G  … 27.8G                                     0 ( 0%)        💩+655.5% ±  2.8%
+  instructions       85.8G  ±  939M                               84.9G  … 86.7G                                     0 ( 0%)        💩+669.1% ±  2.4%
+  cache_references   7.16G  ±  119M                               7.03G  … 7.26G                                     0 ( 0%)        💩+4437.9% ± 21.0%
+  cache_misses       22.9M  ± 7.72M                               18.0M  … 31.8M                                     0 ( 0%)        💩+107.7% ± 19.7%
+  branch_misses      16.0M  ±  192K                               15.8M  … 16.2M                                     0 ( 0%)        💩+ 97.2% ±  1.4%
 ```
 
 </details>
