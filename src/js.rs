@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
-use tokio::sync::mpsc::Receiver;
+use flume::Receiver;
 use tokio::sync::oneshot;
 use tracing::{error, instrument};
 
@@ -212,7 +212,8 @@ pub enum JobResult {
 #[instrument(level = "trace")]
 pub fn start_vm_worker(
     js_code: String,
-    mut rx: Receiver<JobRequest>,
+    rx: Receiver<JobRequest>,
+    init_tx: oneshot::Sender<Result<()>>,
 ) -> Result<JoinHandle<Result<()>>> {
     let handle = thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -267,10 +268,13 @@ pub fn start_vm_worker(
                 .await;
             if let Err(e) = eval_result {
                 error!("Error loading JS code: {}", e);
+                let _ = init_tx.send(Err(anyhow::anyhow!("Error loading JS code: {}", e)));
                 return Err(anyhow::anyhow!("Error loading JS code: {}", e));
             }
 
-            while let Some(job) = rx.recv().await {
+            let _ = init_tx.send(Ok(()));
+
+            while let Ok(job) = rx.recv_async().await {
                 handle_job(&vm, job).await;
             }
             let _ = vm.idle().await;

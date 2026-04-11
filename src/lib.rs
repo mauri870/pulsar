@@ -144,15 +144,26 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = self.workers;
         info!("Starting pulsar engine with {} CPU workers", n_cpus);
-        let mut workers = Vec::with_capacity(n_cpus);
-        for idx in 0..n_cpus {
-            let (worker_tx, worker_rx) = tokio::sync::mpsc::channel(64);
-            workers.push(worker_tx);
+        let (worker_tx, worker_rx) = flume::bounded(64);
+        let mut init_rxs = Vec::with_capacity(n_cpus);
 
-            // spawn each worker with its own receiver
-            if let Err(e) = js::start_vm_worker(self.script.clone(), worker_rx) {
+        for idx in 0..n_cpus {
+            let (init_tx, init_rx) = oneshot::channel();
+            init_rxs.push(init_rx);
+            if let Err(e) = js::start_vm_worker(self.script.clone(), worker_rx.clone(), init_tx) {
                 error!("Failed to start JS VM worker {}: {}", idx, e);
                 return Err(e.into());
+            }
+        }
+        // Drop the original so the channel closes when all workers exit
+        drop(worker_rx);
+
+        // Wait for all workers to finish JS initialisation before proceeding.
+        // This adds a startup delay but ensures we don't get trapped in a deadlock.
+        for init_rx in init_rxs {
+            match init_rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Ok(()),
             }
         }
         info!("Successfully started {} JS VM workers", n_cpus);
@@ -256,12 +267,12 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             .chunks(CHUNK_SIZE)
             .for_each_concurrent(n_cpus, |batch| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let worker = &workers[idx % workers.len()];
+                let worker_tx = worker_tx.clone();
                 let map_tx = map_tx.clone();
 
                 async move {
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Map(batch, resp_tx)).await;
+                    let _ = worker_tx.send_async(JobRequest::Map(batch, resp_tx)).await;
 
                     match resp_rx.await {
                         Ok(JobResult::MapSuccess(output)) => {
@@ -299,7 +310,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let reduce_consumer = tokio::spawn({
             let output_format = self.output_format.clone();
             let sort = self.sort;
-            let worker = workers[0].clone();
+            let worker_tx = worker_tx.clone();
             async move {
                 info!("Starting output writer task");
                 let stdout = tokio::io::stdout();
@@ -319,7 +330,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     );
 
                     let (resp_tx, resp_rx) = oneshot::channel();
-                    let _ = worker.send(JobRequest::Sort(results, resp_tx)).await;
+                    let _ = worker_tx.send_async(JobRequest::Sort(results, resp_tx)).await;
                     match resp_rx.await {
                         Ok(JobResult::SortSuccess(output)) => {
                             info!(
@@ -384,12 +395,12 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         .chunks(CHUNK_SIZE)
         .for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
             let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let worker = &workers[idx % workers.len()];
+            let worker_tx = worker_tx.clone();
             let reduce_tx = reduce_tx.clone();
 
             async move {
                 let (resp_tx, resp_rx) = oneshot::channel();
-                let _ = worker.send(JobRequest::Reduce(batch, resp_tx)).await;
+                let _ = worker_tx.send_async(JobRequest::Reduce(batch, resp_tx)).await;
 
                 match resp_rx.await {
                     Ok(JobResult::ReduceSuccess(value)) => {

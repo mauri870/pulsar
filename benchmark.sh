@@ -30,7 +30,8 @@ This benchmark performs a simple word count aggregation on a 20,000-line
 copy of the Moby Dick by Herman Melville.
 
 Each line is processed by the map function, which introduces an artificial
-delay of approximately 0.23 ms per line, to simulate processing.
+delay with jitter (0.05–0.45 ms per line, uniform random) to simulate
+variable processing times and exercise the work-stealing scheduler.
 
 EOF
 
@@ -93,8 +94,9 @@ async function processLine(line) {
 }
 
 const doWork = async () => {
+  const delay = 0.05 + Math.random() * 0.4;
   const start = performance.now();
-  while ((performance.now() - start) < 0.23) {
+  while ((performance.now() - start) < delay) {
     await new Promise(resolve => setImmediate(resolve));
   }
 }
@@ -127,8 +129,9 @@ const map = async line => {
 };
 
 const doWork = async () => {
+  const delay = 0.05 + Math.random() * 0.4;
   const start = performance.now();
-  while ((performance.now() - start) < 0.23) {
+  while ((performance.now() - start) < delay) {
     await new Promise(resolve => setImmediate(resolve));
   }
 }

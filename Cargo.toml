@@ -24,5 +24,6 @@ futures = "0.3.31"
 tokio-stream = { version = "0.1.17", features = ["io-util"] }
 sled = "0.34.7"
 bincode = "1"
+flume = "0.12"
 pprof2 = { version = "0.13.1", features = ["prost-codec"] }
 
