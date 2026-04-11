@@ -29,6 +29,22 @@ fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Opti
 }
 
 const DEFAULT_CHUNK_SIZE: usize = 64;
+const MAX_GROUPING_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
+
+const HASHMAP_SLOT_SIZE: usize = {
+    let size = std::mem::size_of::<(String, Vec<js::Value>)>();
+    let align = {
+        let a = std::mem::align_of::<(String, Vec<js::Value>)>();
+        let b = std::mem::align_of::<usize>();
+        if a > b { a } else { b }
+    };
+    (size / align) * align
+};
+
+enum GroupStorage {
+    Memory(HashMap<String, Vec<js::Value>>),
+    Sled(sled::Db),
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
@@ -186,16 +202,9 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // aggregate map results
         let (map_tx, mut map_rx) = tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(self.chunk_size);
-        let map_consumer: JoinHandle<Result<sled::Db>> = tokio::spawn(async move {
-            let groups_db = sled::Config::default()
-                .path("pulsar_groups")
-                .temporary(true)
-                .cache_capacity(64 * 1024 * 1024) // 64MB
-                .open()?;
-            groups_db.set_merge_operator(merge_values);
-
+        let map_consumer: JoinHandle<Result<GroupStorage>> = tokio::spawn(async move {
+            let mut overflow_db: Option<sled::Db> = None;
             let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
-            const FLUSH_THRESHOLD: usize = 10_000;
             let mut total_processed = 0;
 
             while let Some(kvs) = map_rx.recv().await {
@@ -208,38 +217,51 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                         .push(kv.value);
                 }
 
-                if hashmap.len() >= FLUSH_THRESHOLD {
+                // check if we need to spill to disk
+                if HASHMAP_SLOT_SIZE * hashmap.capacity() >= MAX_GROUPING_HEAP_BYTES {
                     info!(
                         "Flushing {} entries to DB, total processed: {}",
                         hashmap.len(),
                         total_processed
                     );
+                    let db = match overflow_db {
+                        Some(ref db) => db,
+                        None => {
+                            let db = sled::Config::default()
+                                .path("pulsar_groups")
+                                .temporary(true)
+                                .open()?;
+                            db.set_merge_operator(merge_values);
+                            overflow_db = Some(db);
+                            overflow_db.as_ref().unwrap()
+                        }
+                    };
                     for (key, values) in hashmap.drain() {
                         let values_bytes = serialize(&values)
                             .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
-                        groups_db.merge(key.as_bytes(), values_bytes)?;
+                        db.merge(key.as_bytes(), values_bytes)?;
                     }
                 }
             }
 
-            // Flush any remaining entries
-            if !hashmap.is_empty() {
-                info!(
-                    "Final flush of {} entries to DB, total processed: {}",
-                    hashmap.len(),
-                    total_processed
-                );
-                for (key, values) in hashmap.drain() {
-                    let values_bytes = serialize(&values)
-                        .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
-                    groups_db.merge(key.as_bytes(), values_bytes)?;
-                }
-            }
             info!(
                 "Group phase completed, total key-value pairs processed: {}",
                 total_processed
             );
-            Ok(groups_db)
+
+            if let Some(db) = overflow_db {
+                if !hashmap.is_empty() {
+                    info!("Final flush of {} remaining entries to DB", hashmap.len());
+                    for (key, values) in hashmap.drain() {
+                        let values_bytes = serialize(&values)
+                            .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+                        db.merge(key.as_bytes(), values_bytes)?;
+                    }
+                }
+                Ok(GroupStorage::Sled(db))
+            } else {
+                Ok(GroupStorage::Memory(hashmap))
+            }
         });
 
         // map phase
@@ -283,10 +305,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         // group phase
         info!("Map phase completed, starting group phase");
         drop(map_tx);
-        let groups = map_consumer.await?.unwrap();
+        let groups = map_consumer.await??;
         info!(
-            "Group phase completed, {} total keys in database",
-            groups.len()
+            "Group phase completed, {} total keys",
+            match &groups {
+                GroupStorage::Memory(m) => m.len(),
+                GroupStorage::Sled(db) => db.len(),
+            }
         );
 
         // aggregate reduce results
@@ -355,28 +380,33 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
 
         // reduce phase
         info!("Starting reduce phase");
-        tokio_stream::iter(groups.iter()
-            .filter_map(|res| {
-                match res {
-                    Ok((key, value)) => Some((key, value)),
-                    Err(e) => {
-                        eprintln!("Error iterating sled db: {}", e);
-                        None // Skip entries that cause an error
+        let reduce_entries: Vec<(String, Vec<js::Value>)> = match groups {
+            GroupStorage::Memory(hashmap) => hashmap.into_iter().collect(),
+            GroupStorage::Sled(db) => db.iter()
+                .filter_map(|res| {
+                    match res {
+                        Ok((key, value)) => Some((key, value)),
+                        Err(e) => {
+                            eprintln!("Error iterating sled db: {}", e);
+                            None
+                        }
                     }
-                }
-            })
-            .map(|(k, value_bytes)| {
-                let key: String = String::from_utf8_lossy(&k).to_string();
-                let values: Vec<js::Value> = deserialize(&value_bytes).unwrap_or_else(|e| {
-                    error!(
-                        "Failed to deserialize DB value for key '{:?}': {}. Discarding corrupted data.",
-                        &k,
-                        e
-                    );
-                    Vec::new()
-                });
-                (key, values)
-        }))
+                })
+                .map(|(k, value_bytes)| {
+                    let key: String = String::from_utf8_lossy(&k).to_string();
+                    let values: Vec<js::Value> = deserialize(&value_bytes).unwrap_or_else(|e| {
+                        error!(
+                            "Failed to deserialize DB value for key '{:?}': {}. Discarding corrupted data.",
+                            &k,
+                            e
+                        );
+                        Vec::new()
+                    });
+                    (key, values)
+                })
+                .collect(),
+        };
+        tokio_stream::iter(reduce_entries)
         .chunks(self.chunk_size)
         .for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
             let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
