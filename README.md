@@ -2,9 +2,13 @@
 
 `pulsar` is a high-performance MapReduce engine for processing large datasets using user-defined JavaScript functions. It follows the standard Unix philosophy, reads from stdin or a file, writes to stdout, and composes naturally with other tools via pipes.
 
-Features include ES2023 JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine based on [QuickJS](https://bellard.org/quickjs/), work-stealing scheduler, streaming input/output, automatically spills to disk if intermediate data is too large, NDJSON output, sorting and an embedded test runner.
+Features include ES2023 JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine based on [QuickJS](https://bellard.org/quickjs/), pull-based work-stealing scheduler, streaming input/output, automatically spills to disk if intermediate data is too large, NDJSON output, sorting and an embedded test runner.
 
-Define `map`, `combine`, `reduce`, `sort`, and `test` as async functions in your script. The engine handles parallelism, chunking, grouping, and orchestration. In the diagrams below, lighter sections represent your script and darker sections represent the engine:
+Define `map`, `combine`, `reduce`, `sort`, and `test` as async functions in your script. The engine handles parallelism, work distribution, grouping, and orchestration. In the diagrams below, lighter sections represent your script and darker sections represent the engine:
+
+### Map phase — pull-based scheduler
+
+Each JS worker thread runs `N` concurrent async ticks (controlled by `--chunk-size`, default 64). Every tick loops independently: it pulls the next line from a shared bounded channel, calls `map` (and optionally `combine`), sends the results, then immediately pulls the next line. Workers never wait on each other — a fast worker simply pulls more items. This gives implicit work-stealing with no coordination overhead: the shared channel is the only synchronisation point.
 
 ```mermaid
 flowchart LR
@@ -12,20 +16,21 @@ flowchart LR
   subgraph pulsar["Pulsar"]
     direction TB
     pi([Input]) --> ch
-    ch([Chunking]) --> sched
+    ch[(Line Channel)]
     subgraph sched["Scheduler"]
       direction LR
       subgraph w1["Thread 1 (JS VM)"]
-        mc1["map / combine"]
+        mc1["map / combine ×N"]
       end
       subgraph w2["Thread 2 (JS VM)"]
-        mc2["map / combine"]
+        mc2["map / combine ×N"]
       end
       subgraph wn["Thread N (JS VM)"]
-        mcn["map / combine"]
+        mcn["map / combine ×N"]
       end
       mc1 ~~~ mc2 ~~~ mcn
     end
+    ch -->|pull| sched
     sched --> group["Group"] --> reduce["reduce"] --> sort["Sort (optional)"] --> po([Output])
   end
 

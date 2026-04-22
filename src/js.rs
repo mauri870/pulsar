@@ -2,12 +2,13 @@ use anyhow::{Context, Result};
 use llrt_core::vm::Vm;
 use rquickjs::{CatchResultExt, Coerced};
 use rquickjs::{Function, async_with, prelude::Promise};
+use rquickjs::function::Async;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::thread::{self, JoinHandle};
 use flume::Receiver;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, instrument};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,7 +178,12 @@ impl From<&Value> for serde_json::Value {
 }
 
 pub enum JobRequest {
-    Map(Vec<String>, oneshot::Sender<JobResult>),
+    RunMapPhase {
+        item_rx: Receiver<String>,
+        result_tx: mpsc::Sender<Vec<KeyValue>>,
+        concurrency: usize,
+        done_tx: oneshot::Sender<Result<()>>,
+    },
     Reduce(Vec<(String, Vec<Value>)>, oneshot::Sender<JobResult>),
     Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
 }
@@ -185,9 +191,9 @@ pub enum JobRequest {
 impl fmt::Debug for JobRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            JobRequest::Map(input, _) => f
-                .debug_struct("JobRequest::Map")
-                .field("input", input)
+            JobRequest::RunMapPhase { concurrency, .. } => f
+                .debug_struct("JobRequest::RunMapPhase")
+                .field("concurrency", concurrency)
                 .finish(),
             JobRequest::Reduce(pairs, _) => f
                 .debug_struct("JobRequest::Reduce")
@@ -203,7 +209,6 @@ impl fmt::Debug for JobRequest {
 
 #[derive(Debug, Clone)]
 pub enum JobResult {
-    MapSuccess(Vec<KeyValue>),
     ReduceSuccess(Vec<KeyValue>),
     SortSuccess(Vec<KeyValue>),
     Error(String),
@@ -231,18 +236,22 @@ pub fn start_vm_worker(
                 .ctx
                 .with(|ctx| {
                     let wrapper = r#"
-                        const flatMap = async (batch) => {
+                        const runMapWorker = async (concurrency) => {
                             if (typeof map !== 'function') {
-                                throw new Error('Map function is not defined');
+                                throw new Error('map function is not defined');
                             }
-
-                            let mapped = (await Promise.all(batch.map(map))).flat();
-
-                            if (typeof combine === 'function') {
-                                mapped = await combine(mapped);
-                            }
-
-                            return mapped;
+                            const tick = async () => {
+                                while (true) {
+                                    const item = await nextMapItem();
+                                    if (item == null) return;
+                                    let pairs = await map(item);
+                                    if (typeof combine === 'function') {
+                                        pairs = await combine(pairs);
+                                    }
+                                    await sendMapResults(pairs);
+                                }
+                            };
+                            await Promise.all(Array.from({length: concurrency}, tick));
                         };
 
                         const flatReduce = async (batch) => {
@@ -289,29 +298,51 @@ pub fn start_vm_worker(
 #[instrument(level = "trace", skip(vm))]
 async fn handle_job(vm: &Vm, job: JobRequest) {
     match job {
-        JobRequest::Map(batch, respond_to) => {
+        JobRequest::RunMapPhase { item_rx, result_tx, concurrency, done_tx } => {
             let result = async_with!(vm.ctx => |ctx| {
-                let flat_map_fn = ctx.globals()
-                    .get::<_, Function>("flatMap")
-                    .or_else(|_| ctx.eval("flatMap"))
-                    .map_err(|e| format!("flatMap function not found: {}", e))?;
-                let promise: Promise = flat_map_fn
-                    .call((batch,))
+                let rx = item_rx.clone();
+                ctx.globals().set(
+                    "nextMapItem",
+                    Function::new(ctx.clone(), Async(move || {
+                        let rx = rx.clone();
+                        async move { rx.recv_async().await.ok() }
+                    })),
+                ).map_err(|e| e.to_string())?;
+                let tx = result_tx.clone();
+                ctx.globals().set(
+                    "sendMapResults",
+                    Function::new(ctx.clone(), Async(move |kvs: Vec<KeyValue>| {
+                        let tx = tx.clone();
+                        async move { let _ = tx.send(kvs).await; }
+                    })),
+                ).map_err(|e| e.to_string())?;
+                let run_fn = ctx.globals()
+                    .get::<_, Function>("runMapWorker")
+                    .or_else(|_| ctx.eval("runMapWorker"))
+                    .map_err(|e| format!("runMapWorker not found: {}", e))?;
+                let promise: Promise = run_fn
+                    .call((concurrency as u32,))
                     .catch(&ctx)
-                    .map_err(|e| format!("Failed to call map function: {}", e))?;
-                let output: Vec<KeyValue> = promise
+                    .map_err(|e| format!("Failed to call runMapWorker: {}", e))?;
+                let () = promise
                     .into_future()
                     .await
                     .catch(&ctx)
-                    .map_err(|e| format!("JavaScript error: {}", e))?;
-                Ok(output)
+                    .map_err(|e| format!("JavaScript error in runMapWorker: {}", e))?;
+                Ok(())
             })
             .await;
 
-            let _ = match result {
-                Ok(output) => respond_to.send(JobResult::MapSuccess(output)),
-                Err(e) => respond_to.send(JobResult::Error(e)),
-            };
+            // Overwrite globals to drop the Sender clones they hold.
+            // QuickJS uses reference counting so the closures are freed immediately.
+            let _ = async_with!(vm.ctx => |ctx| {
+                ctx.globals().set("nextMapItem", rquickjs::Value::new_null(ctx.clone()))?;
+                ctx.globals().set("sendMapResults", rquickjs::Value::new_null(ctx.clone()))?;
+                Ok::<_, rquickjs::Error>(())
+            })
+            .await;
+
+            let _ = done_tx.send(result.map_err(|e: String| anyhow::anyhow!(e)));
         }
         JobRequest::Reduce(batch, respond_to) => {
             let result = async_with!(vm.ctx => |ctx| {
