@@ -466,6 +466,27 @@ const test = async () => { if (map('x').length !== 1) throw new Error('bad'); };
 
 #[cfg(feature = "v8")]
 #[test]
+fn the_v8_engine_runs_a_script_that_waits_on_timers() {
+    let sandbox = Sandbox::new("v8-timers");
+    let script = sandbox.write(
+        "timers.js",
+        "\
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const map = async line => { await wait(2); return line.split(' ').map(word => [word, 1]); };
+const reduce = (key, values) => values.length;
+",
+    );
+    let path = script.to_str().unwrap();
+    let input = "a b a\nb a\n";
+    let llrt = sandbox.run(&["--engine", "llrt", "-s", path], input);
+    let v8 = sandbox.run(&["--engine", "v8", "-s", path], input);
+    assert_eq!(v8.status.code(), Some(0), "{}", stderr_text(&v8));
+    assert_eq!(stdout_lines(&v8), ["a: 3", "b: 2"]);
+    assert_eq!(stdout_lines(&v8), stdout_lines(&llrt));
+}
+
+#[cfg(feature = "v8")]
+#[test]
 fn the_v8_engine_reports_a_script_that_needs_node_apis() {
     let sandbox = Sandbox::new("v8-no-node");
     let script = sandbox.write(

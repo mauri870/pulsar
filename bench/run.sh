@@ -6,6 +6,7 @@
 #   bench/run.sh              build, then run every workload
 #   WORKERS=4 bench/run.sh    run with -j 4
 #   RUNS=5 bench/run.sh       more runs per workload
+#   ENGINE=v8 bench/run.sh    build with the v8 feature and run with --engine v8
 set -e
 cd "$(dirname "$0")/.."
 
@@ -15,10 +16,15 @@ export LC_ALL=C
 BIN=./target/release/pulsar
 RUNS=${RUNS:-3}
 EXTRA=()
-if [ -n "$WORKERS" ]; then EXTRA=(-j "$WORKERS"); fi
+if [ -n "$WORKERS" ]; then EXTRA+=(-j "$WORKERS"); fi
+FEATURES=()
+if [ -n "$ENGINE" ]; then
+    EXTRA+=(--engine "$ENGINE")
+    if [ "$ENGINE" = v8 ]; then FEATURES=(--features v8); fi
+fi
 
 bench/gen.sh
-cargo build --release 2>&1 | tail -1 >&2
+cargo build --release "${FEATURES[@]}" 2>&1 | tail -1 >&2
 
 median() {
     sort -n | awk '{ v[NR] = $1 } END { print v[int((NR + 1) / 2)] }'

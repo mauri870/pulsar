@@ -74,7 +74,7 @@ cargo install --path=. --features v8
 pulsar --engine v8 -f input_file -s script_file
 ```
 
-V8 runs plain ECMAScript only: `require`, `setTimeout`/`setImmediate`, `performance` and `fetch` are not available, `console.log` prints nothing, and an `async` function that waits for a timer or I/O is reported as an error. Everything else behaves the same: the script contract, error messages, `--sort`, `--test` and the output formats.
+V8 runs plain ECMAScript plus a few host functions: `setTimeout`, `setImmediate`, `clearTimeout`, `clearImmediate`, `performance.now` and `console` (written to stderr, so it never mixes into the results). `require`, `fetch` and other Node or I/O APIs are not available, and an `async` function that waits for something other than a timer is reported as an error. Everything else behaves the same: the script contract, error messages, `--sort`, `--test` and the output formats.
 
 On 98 MB of text with the default word count script and 16 workers, V8 finished in 0.54 s where LLRT took 1.79 s (4.5 times faster on one worker), and it uses more memory (about 1.06 GB against 0.69 GB peak). Scripts that do little per line, such as splitting on spaces, run at the same speed on both because the rest of the pipeline is the limit.
 
