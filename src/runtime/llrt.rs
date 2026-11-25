@@ -135,16 +135,20 @@ globalThis.__pulsar = (() => {
     const mapBatch = async (lines) => {
         const results = await Promise.all(lines.map(async (line) => {
             try {
-                let pairs = await map(line);
-                if (hasCombine) {
-                    pairs = await combine(pairs);
-                }
-                return pairs;
+                return await map(line);
             } catch (error) {
                 throw new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
             }
         }));
-        return results.flat(1);
+        const pairs = results.flat(1);
+        if (!hasCombine) {
+            return pairs;
+        }
+        try {
+            return await combine(pairs);
+        } catch (error) {
+            throw new Error(`combine failed on a batch of ${lines.length} lines: ${error}`);
+        }
     };
 
     const reduceBatch = async (batch) => {

@@ -93,9 +93,7 @@ const reduce = () => 1;
     assert_eq!(pairs.len(), 1);
 }
 
-#[tokio::test]
-async fn combine_runs_once_per_line_when_it_is_defined() {
-    let script = "\
+const SUMMING_COMBINE: &str = "\
 const map = line => line.split(' ').map(word => [word, 1]);
 const combine = pairs => {
   const sums = {};
@@ -104,9 +102,45 @@ const combine = pairs => {
 };
 const reduce = (key, values) => values.length;
 ";
+
+#[tokio::test]
+async fn combine_merges_the_pairs_of_the_whole_batch() {
+    let runtime = load(SUMMING_COMBINE).await.unwrap();
+    let pairs = runtime
+        .map_batch(vec!["a a b".to_string(), "a c".to_string()])
+        .await
+        .unwrap();
+    let totals: HashMap<String, Value> = pairs.into_iter().map(|pair| (pair.key, pair.value)).collect();
+    assert_eq!(totals.len(), 3, "the `a` pairs of both lines should be merged");
+    assert_eq!(totals["a"], Value::Int(3));
+    assert_eq!(totals["b"], Value::Int(1));
+    assert_eq!(totals["c"], Value::Int(1));
+}
+
+#[tokio::test]
+async fn combine_does_not_merge_across_batches() {
+    let runtime = load(SUMMING_COMBINE).await.unwrap();
+    let first = runtime.map_batch(vec!["a".to_string()]).await.unwrap();
+    let second = runtime.map_batch(vec!["a".to_string()]).await.unwrap();
+    assert_eq!(first.len() + second.len(), 2);
+}
+
+#[tokio::test]
+async fn a_failing_combine_names_the_batch_size() {
+    let script = "\
+const map = line => [[line, 1]];
+const combine = pairs => { throw new Error('cannot combine'); };
+const reduce = () => 1;
+";
     let runtime = load(script).await.unwrap();
-    let pairs = runtime.map_batch(vec!["a a b".to_string()]).await.unwrap();
-    assert_eq!(pairs.len(), 2, "combine should merge the two `a` pairs");
+    let error = runtime
+        .map_batch(vec!["a".to_string(), "b".to_string()])
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(matches!(error, Error::Map(_)));
+    assert!(message.contains("combine failed on a batch of 2 lines"), "{}", message);
+    assert!(message.contains("cannot combine"), "{}", message);
 }
 
 #[tokio::test]
