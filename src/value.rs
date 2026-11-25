@@ -28,6 +28,15 @@ impl Value {
     }
 }
 
+/// The shard a key belongs to, out of `shards`. The same key always maps to
+/// the same shard, in every thread and every run of the same binary.
+pub fn shard_of(key: &str, shards: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (hasher.finish() % shards as u64) as usize
+}
+
 // Key-value pair for MapReduce operations
 #[derive(Debug, Clone)]
 pub struct KeyValue {

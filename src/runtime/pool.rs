@@ -4,12 +4,12 @@ use tokio::sync::oneshot;
 use super::ScriptRuntime;
 use crate::error::{Error, Result};
 use crate::script::Contract;
-use crate::value::{KeyValue, Value};
+use crate::value::{KeyValue, Value, shard_of};
 
 type Reply<T> = oneshot::Sender<Result<T>>;
 
 enum Job {
-    Map(Vec<String>, Reply<Vec<KeyValue>>),
+    Map(Vec<String>, usize, Reply<Vec<Vec<KeyValue>>>),
     Reduce(Vec<(String, Vec<Value>)>, Reply<Vec<KeyValue>>),
     Sort(Vec<KeyValue>, Reply<Vec<KeyValue>>),
     Test(Reply<()>),
@@ -60,8 +60,11 @@ impl WorkerPool {
         Ok(WorkerPool { jobs, threads })
     }
 
-    pub async fn map_batch(&self, lines: Vec<String>) -> Result<Vec<KeyValue>> {
-        self.submit(|reply| Job::Map(lines, reply)).await
+    /// Runs `map` on a batch of lines. The pairs it produced come back split
+    /// into `shards` groups by key, so the same key is always in the same
+    /// one; the splitting is done on the worker thread.
+    pub async fn map_batch(&self, lines: Vec<String>, shards: usize) -> Result<Vec<Vec<KeyValue>>> {
+        self.submit(|reply| Job::Map(lines, shards, reply)).await
     }
 
     pub async fn reduce_batch(&self, groups: Vec<(String, Vec<Value>)>) -> Result<Vec<KeyValue>> {
@@ -99,6 +102,18 @@ impl WorkerPool {
     }
 }
 
+/// Splits pairs into `shards` groups by the shard of their key.
+fn partition(pairs: Vec<KeyValue>, shards: usize) -> Vec<Vec<KeyValue>> {
+    if shards == 1 {
+        return vec![pairs];
+    }
+    let mut parts: Vec<Vec<KeyValue>> = (0..shards).map(|_| Vec::new()).collect();
+    for pair in pairs {
+        parts[shard_of(&pair.key, shards)].push(pair);
+    }
+    parts
+}
+
 /// Reports a startup failure to the waiting caller and returns it.
 fn fail_startup(ready: Reply<()>, error: Error) -> Result<()> {
     let message = error.to_string();
@@ -134,8 +149,9 @@ fn run_worker<R: ScriptRuntime>(
 
         while let Ok(job) = jobs.recv_async().await {
             match job {
-                Job::Map(lines, reply) => {
-                    let _ = reply.send(script_runtime.map_batch(lines).await);
+                Job::Map(lines, shards, reply) => {
+                    let pairs = script_runtime.map_batch(lines).await;
+                    let _ = reply.send(pairs.map(|pairs| partition(pairs, shards)));
                 }
                 Job::Reduce(groups, reply) => {
                     let _ = reply.send(script_runtime.reduce_batch(groups).await);

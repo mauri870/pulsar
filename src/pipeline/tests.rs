@@ -144,7 +144,7 @@ async fn counts_words_for_every_worker_and_batch_size() {
     for (workers, chunk_size) in [(1, 1), (2, 1), (4, 3), (3, 100)] {
         let (sink, written) = VecSink::new();
         let source = VecSource::lines(&["a b a", "b a", "c", ""]);
-        run_pipeline::<FakeRuntime>("", &settings(workers, chunk_size, false), source, sink, MemoryStore::default())
+        run_pipeline::<FakeRuntime>("", &settings(workers, chunk_size, false), source, sink, vec![MemoryStore::default()])
             .await
             .unwrap();
         assert_eq!(counts(&written), expected, "{} workers, chunk {}", workers, chunk_size);
@@ -154,7 +154,7 @@ async fn counts_words_for_every_worker_and_batch_size() {
 #[tokio::test]
 async fn empty_input_writes_nothing() {
     let (sink, written) = VecSink::new();
-    run_pipeline::<FakeRuntime>("", &settings(2, 4, false), VecSource::lines(&[]), sink, MemoryStore::default())
+    run_pipeline::<FakeRuntime>("", &settings(2, 4, false), VecSource::lines(&[]), sink, vec![MemoryStore::default()])
         .await
         .unwrap();
     assert!(written.lock().unwrap().is_empty());
@@ -164,7 +164,7 @@ async fn empty_input_writes_nothing() {
 async fn sort_orders_the_results_through_the_runtime() {
     let (sink, written) = VecSink::new();
     let source = VecSource::lines(&["b a c", "a"]);
-    run_pipeline::<FakeRuntime>("", &settings(2, 1, true), source, sink, MemoryStore::default())
+    run_pipeline::<FakeRuntime>("", &settings(2, 1, true), source, sink, vec![MemoryStore::default()])
         .await
         .unwrap();
     let keys: Vec<String> = written.lock().unwrap().iter().map(|(key, _)| key.clone()).collect();
@@ -177,7 +177,7 @@ async fn a_map_failure_is_returned() {
     let mut lines = vec!["x"; 500];
     lines.insert(250, "map-error");
     let result =
-        run_pipeline::<FakeRuntime>("", &settings(4, 2, false), VecSource::lines(&lines), sink, MemoryStore::default()).await;
+        run_pipeline::<FakeRuntime>("", &settings(4, 2, false), VecSource::lines(&lines), sink, vec![MemoryStore::default()]).await;
     assert!(matches!(result, Err(Error::Map(_))), "{:?}", result);
 }
 
@@ -185,7 +185,7 @@ async fn a_map_failure_is_returned() {
 async fn a_reduce_failure_is_returned() {
     let (sink, _) = VecSink::new();
     let source = VecSource::lines(&["a", "reduce-error", "b"]);
-    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, MemoryStore::default()).await;
+    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, vec![MemoryStore::default()]).await;
     assert!(matches!(result, Err(Error::Reduce(_))), "{:?}", result);
 }
 
@@ -196,7 +196,7 @@ async fn a_read_error_is_returned() {
         Ok("a".to_string()),
         Err(io::Error::new(io::ErrorKind::InvalidData, "bad line")),
     ]);
-    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, MemoryStore::default()).await;
+    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, vec![MemoryStore::default()]).await;
     assert!(matches!(result, Err(Error::ReadInput(_))), "{:?}", result);
 }
 
@@ -208,7 +208,7 @@ async fn a_sink_failure_is_returned_as_the_root_cause() {
     let mut lines: Vec<&str> = words.iter().map(String::as_str).collect();
     lines.push("b");
     let result =
-        run_pipeline::<FakeRuntime>("", &settings(3, 4, false), VecSource::lines(&lines), sink, MemoryStore::default()).await;
+        run_pipeline::<FakeRuntime>("", &settings(3, 4, false), VecSource::lines(&lines), sink, vec![MemoryStore::default()]).await;
     assert!(matches!(result, Err(Error::WriteOutput(_))), "{:?}", result);
 }
 
@@ -223,7 +223,11 @@ async fn counts_words_when_the_group_store_spills_to_disk() {
         &settings(2, 1, false),
         source,
         sink,
-        SpillStore::new(directory.clone(), 1),
+        vec![
+            SpillStore::new(directory.join("0"), 1),
+            SpillStore::new(directory.join("1"), 1),
+            SpillStore::new(directory.join("2"), 1),
+        ],
     )
     .await
     .unwrap();
@@ -236,5 +240,27 @@ async fn counts_words_when_the_group_store_spills_to_disk() {
             ("d".to_string(), 4),
         ])
     );
-    assert!(!directory.exists());
+    assert!(!directory.join("0").exists());
+}
+
+#[tokio::test]
+async fn counts_words_when_the_grouping_is_sharded() {
+    let expected: BTreeMap<String, i64> = (0..50)
+        .map(|n| (format!("word{}", n), (n % 5 + 1) as i64))
+        .collect();
+    let lines: Vec<String> = expected
+        .iter()
+        .flat_map(|(word, count)| (0..*count).map(move |_| word.clone()))
+        .collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    for shards in [1, 2, 3, 7] {
+        let (sink, written) = VecSink::new();
+        let stores: Vec<MemoryStore> = (0..shards).map(|_| MemoryStore::default()).collect();
+        run_pipeline::<FakeRuntime>("", &settings(4, 5, false), VecSource::lines(&refs), sink, stores)
+            .await
+            .unwrap();
+        assert_eq!(counts(&written), expected, "{} shards", shards);
+        // Each key is reduced exactly once, whatever the sharding.
+        assert_eq!(written.lock().unwrap().len(), expected.len(), "{} shards", shards);
+    }
 }

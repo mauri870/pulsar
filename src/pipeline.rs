@@ -26,6 +26,11 @@ use crate::value::{KeyValue, Value};
 #[cfg(test)]
 mod tests;
 
+/// How many ways the grouping is split by key. Grouping one pair costs about
+/// as much as a light map function, so a single group stage is the limit of a
+/// run with many workers; a few shards are enough to stay ahead of them.
+const MAX_GROUP_SHARDS: usize = 4;
+
 /// The settings the stages need.
 #[derive(Debug, Clone)]
 pub(crate) struct Settings {
@@ -63,13 +68,14 @@ fn task_failed(error: JoinError) -> Error {
 }
 
 /// Runs the whole pipeline: read `source`, map, group, reduce, and write the
-/// results to `sink`.
+/// results to `sink`. The grouping is split by key over `stores`, one group
+/// stage each, so that it does not become the one serial part of a run.
 pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
     script: &str,
     settings: &Settings,
     source: impl Source,
     sink: impl Sink,
-    store: impl GroupStore,
+    stores: Vec<impl GroupStore>,
 ) -> Result<()> {
     info!("Starting pulsar engine with {} CPU workers", settings.workers);
     let contract = Contract {
@@ -79,9 +85,14 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
     let pool = Arc::new(WorkerPool::start::<R>(script, contract, settings.workers).await?);
     info!("Successfully started {} JS VM workers", settings.workers);
 
-    let (map_results, map_receiver) = mpsc::channel(settings.workers * 2);
+    let mut map_results = Vec::with_capacity(stores.len());
+    let mut groups = Vec::with_capacity(stores.len());
+    for store in stores {
+        let (sender, receiver) = mpsc::channel(settings.workers * 2);
+        map_results.push(sender);
+        groups.push(Task::spawn(group_stage(receiver, store)));
+    }
     let (reduce_results, reduce_receiver) = mpsc::channel(settings.chunk_size);
-    let group = Task::spawn(group_stage(map_receiver, store));
     let output = Task::spawn(output_stage(
         reduce_receiver,
         Arc::clone(&pool),
@@ -93,11 +104,17 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
     map_stage(source, &pool, settings, map_results).await?;
 
     info!("Map phase completed, starting group phase");
-    let store = group.join().await?;
-    info!("Group phase completed, {} total keys", store.key_count());
+    let mut stores = Vec::with_capacity(groups.len());
+    for group in groups {
+        stores.push(group.join().await?);
+    }
+    info!(
+        "Group phase completed, {} total keys",
+        stores.iter().map(|store| store.key_count()).sum::<usize>()
+    );
 
     info!("Starting reduce phase");
-    if let Err(reduce_error) = reduce_stage(store, &pool, settings, reduce_results).await {
+    if let Err(reduce_error) = reduce_stage(stores, &pool, settings, reduce_results).await {
         // A failed writer is the root cause of a failed send, so report it first.
         if output.is_finished() {
             output.join().await?;
@@ -115,14 +132,16 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
 }
 
 /// Sends batches of lines to the workers, a few batches per worker at a time,
-/// and forwards the pairs each batch produced. Returns when the input is
-/// exhausted and every batch is done, or at the first failure.
+/// and forwards the pairs each batch produced to the group stage of the shard
+/// they belong to (`results` has one sender per shard). Returns when the
+/// input is exhausted and every batch is done, or at the first failure.
 async fn map_stage(
     source: impl Source,
     pool: &WorkerPool,
     settings: &Settings,
-    results: mpsc::Sender<Vec<KeyValue>>,
+    results: Vec<mpsc::Sender<Vec<KeyValue>>>,
 ) -> Result<()> {
+    let shards = results.len();
     let mut lines = source.into_lines();
     let mut batch = Vec::with_capacity(settings.chunk_size);
     let mut in_flight = FuturesUnordered::new();
@@ -132,24 +151,29 @@ async fn map_stage(
     while !input_done || !in_flight.is_empty() {
         tokio::select! {
             Some(result) = in_flight.next(), if !in_flight.is_empty() => {
-                let pairs = result?;
-                results
-                    .send(pairs)
-                    .await
-                    .map_err(|_| Error::Worker("the group stage stopped".into()))?;
+                let parts: Vec<Vec<KeyValue>> = result?;
+                for (sender, pairs) in results.iter().zip(parts) {
+                    if pairs.is_empty() {
+                        continue;
+                    }
+                    sender
+                        .send(pairs)
+                        .await
+                        .map_err(|_| Error::Worker("the group stage stopped".into()))?;
+                }
             }
             line = lines.next(), if !input_done && in_flight.len() < max_in_flight => match line {
                 Some(Ok(line)) => {
                     batch.push(line);
                     if batch.len() == settings.chunk_size {
-                        in_flight.push(pool.map_batch(std::mem::take(&mut batch)));
+                        in_flight.push(pool.map_batch(std::mem::take(&mut batch), shards));
                     }
                 }
                 Some(Err(e)) => return Err(Error::ReadInput(e)),
                 None => {
                     input_done = true;
                     if !batch.is_empty() {
-                        in_flight.push(pool.map_batch(std::mem::take(&mut batch)));
+                        in_flight.push(pool.map_batch(std::mem::take(&mut batch), shards));
                     }
                 }
             },
@@ -182,13 +206,18 @@ async fn group_stage<S: GroupStore>(
 /// batches being reduced are in memory besides the store itself. Returns at
 /// the first failure.
 async fn reduce_stage(
-    store: impl GroupStore,
+    stores: Vec<impl GroupStore>,
     pool: &Arc<WorkerPool>,
     settings: &Settings,
     results: mpsc::Sender<KeyValue>,
 ) -> Result<()> {
     let task_index = AtomicUsize::new(0);
-    futures::stream::iter(store.into_batches(settings.chunk_size))
+    let batch_size = settings.chunk_size;
+    futures::stream::iter(
+        stores
+            .into_iter()
+            .flat_map(move |store| store.into_batches(batch_size)),
+    )
         .try_for_each_concurrent(settings.workers, |batch: Vec<(String, Vec<Value>)>| {
             let index = task_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let pool = Arc::clone(pool);
@@ -295,16 +324,22 @@ impl Pulsar {
             return self.run_tests().await;
         }
 
+        let shards = self.settings.workers.clamp(1, MAX_GROUP_SHARDS);
+        let stores = (0..shards)
+            .map(|shard| {
+                SpillStore::new(
+                    self.tmpdir
+                        .join(format!("pulsar-groups-{}-{}", std::process::id(), shard)),
+                    DEFAULT_MEMORY_LIMIT_BYTES / shards,
+                )
+            })
+            .collect();
         run_pipeline::<LlrtRuntime>(
             &self.script,
             &self.settings,
             self.source,
             StdoutSink::new(self.output_format),
-            SpillStore::new(
-                self.tmpdir
-                    .join(format!("pulsar-groups-{}", std::process::id())),
-                DEFAULT_MEMORY_LIMIT_BYTES,
-            ),
+            stores,
         )
         .await?;
 
