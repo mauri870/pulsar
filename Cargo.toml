@@ -7,13 +7,11 @@ edition = "2024"
 tikv-jemallocator = "0.6"
 
 [dependencies]
-async-trait = "0.1"
 llrt_core = { path = "llrt/llrt_core", default-features = true }
 rquickjs = { version = "0.14", features = ["full-async"] }
 clap = { version = "4.0.4", features = ["derive", "cargo"]}
 anyhow = "1.0"
 thiserror = "2.0.12"
-rayon = "1.10.0"
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.141"
