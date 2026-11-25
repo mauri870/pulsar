@@ -2,17 +2,16 @@
 //! [`GroupStore`] trait; whether groups stay in memory or spill to disk is
 //! up to the implementation.
 
-use bincode::{deserialize, serialize};
+use bincode::{deserialize_from, serialize_into};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::value::{KeyValue, Value};
-
-/// Memory the groups may use before [`SpillStore`] moves them to disk.
-pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 
 /// A key and every value that was mapped to it.
 pub type Group = (String, Vec<Value>);
@@ -25,7 +24,8 @@ pub trait GroupStore: Send + 'static {
     /// Called once after the last `add`.
     fn finish(&mut self) -> Result<()>;
 
-    /// Number of distinct keys. Meaningful after `finish`.
+    /// Number of distinct keys, or for a store that spilled, an upper bound
+    /// (a key spilled more than once is counted each time). Meaningful after `finish`.
     fn key_count(&self) -> usize;
 
     /// Every group, consuming the store, in batches of at most `batch_size`
@@ -88,23 +88,137 @@ fn new_group_bytes(key: &str) -> usize {
     std::mem::size_of::<(String, Vec<Value>)>() + key.len()
 }
 
-fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut values: Vec<Value> = old_value
-        .and_then(|bytes| deserialize(bytes).ok())
-        .unwrap_or_default();
-    let new_values: Vec<Value> = deserialize(new_bytes).unwrap_or_default();
-    values.extend(new_values);
-    serialize(&values).ok()
+/// Files holding the groups a [`SpillStore`] moved out of memory, one file per
+/// spill and each sorted by key. They are removed, along with their
+/// directory, when this is dropped.
+struct Runs {
+    directory: PathBuf,
+    /// Each file and the number of groups in it.
+    files: Vec<(PathBuf, usize)>,
 }
 
-/// Keeps groups in memory until they grow past a limit, then moves them to a
-/// temporary on-disk database in `directory` and keeps merging into it.
+impl Runs {
+    /// Writes `groups` to a new run file, sorted by key.
+    fn write(&mut self, groups: HashMap<String, Vec<Value>>) -> Result<()> {
+        std::fs::create_dir_all(&self.directory).map_err(Error::Spill)?;
+        let path = self.directory.join(format!("run-{}.bin", self.files.len()));
+
+        let mut entries: Vec<Group> = groups.into_iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut writer = BufWriter::new(File::create(&path).map_err(Error::Spill)?);
+        for entry in &entries {
+            serialize_into(&mut writer, entry)?;
+        }
+        writer.flush().map_err(Error::Spill)?;
+        self.files.push((path, entries.len()));
+        Ok(())
+    }
+}
+
+impl Drop for Runs {
+    fn drop(&mut self) {
+        for (path, _) in &self.files {
+            let _ = std::fs::remove_file(path);
+        }
+        if !self.files.is_empty() {
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+}
+
+/// Reads the groups of one run file in order.
+struct RunReader {
+    reader: BufReader<File>,
+    /// The next group of the run, if any is left.
+    current: Option<Group>,
+}
+
+impl RunReader {
+    fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(Error::Spill)?;
+        let mut reader = RunReader {
+            reader: BufReader::new(file),
+            current: None,
+        };
+        reader.advance()?;
+        Ok(reader)
+    }
+
+    fn advance(&mut self) -> Result<()> {
+        let at_end = self.reader.fill_buf().map_err(Error::Spill)?.is_empty();
+        self.current = if at_end {
+            None
+        } else {
+            Some(deserialize_from(&mut self.reader)?)
+        };
+        Ok(())
+    }
+}
+
+/// Merges the sorted runs into groups in key order, combining the values of a
+/// key that appears in several runs. The files are opened when the first
+/// group is asked for, and are removed when the iterator is dropped. After an
+/// error the iterator ends.
+fn merge_runs(runs: Runs) -> impl Iterator<Item = Result<Group>> + Send {
+    let mut readers: Option<Vec<RunReader>> = None;
+    let mut failed = false;
+    std::iter::from_fn(move || {
+        if failed {
+            return None;
+        }
+        let next = (|| -> Result<Option<Group>> {
+            let readers = match &mut readers {
+                Some(readers) => readers,
+                None => {
+                    let opened = runs
+                        .files
+                        .iter()
+                        .map(|(path, _)| RunReader::open(path))
+                        .collect::<Result<Vec<_>>>()?;
+                    readers.insert(opened)
+                }
+            };
+
+            let Some(key) = readers
+                .iter()
+                .filter_map(|reader| reader.current.as_ref().map(|(key, _)| key))
+                .min()
+                .cloned()
+            else {
+                return Ok(None);
+            };
+
+            let mut values = Vec::new();
+            for reader in readers.iter_mut() {
+                if matches!(&reader.current, Some((current, _)) if *current == key) {
+                    if let Some((_, mut more)) = reader.current.take() {
+                        values.append(&mut more);
+                    }
+                    reader.advance()?;
+                }
+            }
+            Ok(Some((key, values)))
+        })();
+        match next {
+            Ok(group) => group.map(Ok),
+            Err(error) => {
+                failed = true;
+                Some(Err(error))
+            }
+        }
+    })
+}
+
+/// Keeps groups in memory until they grow past a limit, then writes them to a
+/// sorted run file in `directory` and starts over. Reading the groups back
+/// merges the runs, so a key that was spilled several times still comes out
+/// as one group.
 pub struct SpillStore {
     memory: HashMap<String, Vec<Value>>,
-    database: Option<sled::Db>,
     /// Estimated size of what `memory` holds.
     memory_bytes: usize,
-    directory: PathBuf,
+    runs: Runs,
     memory_limit_bytes: usize,
 }
 
@@ -112,30 +226,21 @@ impl SpillStore {
     pub fn new(directory: PathBuf, memory_limit_bytes: usize) -> Self {
         SpillStore {
             memory: HashMap::new(),
-            database: None,
             memory_bytes: 0,
-            directory,
+            runs: Runs {
+                directory,
+                files: Vec::new(),
+            },
             memory_limit_bytes,
         }
     }
 
-    /// Moves every in-memory group into the database, creating it first if needed.
+    /// Writes every in-memory group to a new run.
     fn spill(&mut self) -> Result<()> {
-        if self.database.is_none() {
-            let database = sled::Config::default()
-                .path(&self.directory)
-                .temporary(true)
-                .open()?;
-            database.set_merge_operator(merge_values);
-            self.database = Some(database);
-        }
-        let database = self.database.as_ref().unwrap();
-
-        info!("Flushing {} entries to DB", self.memory.len());
+        info!("Flushing {} groups to disk", self.memory.len());
         // Taking the map also releases its capacity, which `drain` would keep.
-        for (key, values) in std::mem::take(&mut self.memory) {
-            database.merge(key.as_bytes(), serialize(&values)?)?;
-        }
+        let groups = std::mem::take(&mut self.memory);
+        self.runs.write(groups)?;
         self.memory_bytes = 0;
         Ok(())
     }
@@ -160,35 +265,23 @@ impl GroupStore for SpillStore {
     }
 
     fn finish(&mut self) -> Result<()> {
-        if self.database.is_some() && !self.memory.is_empty() {
-            info!("Final flush of {} remaining entries to DB", self.memory.len());
+        if !self.runs.files.is_empty() && !self.memory.is_empty() {
+            info!("Final flush of {} remaining groups to disk", self.memory.len());
             self.spill()?;
         }
         Ok(())
     }
 
     fn key_count(&self) -> usize {
-        match &self.database {
-            Some(database) => database.len(),
-            None => self.memory.len(),
-        }
+        // A key that was spilled more than once is counted once per run.
+        self.memory.len() + self.runs.files.iter().map(|(_, count)| count).sum::<usize>()
     }
 
     fn into_batches(self, batch_size: usize) -> impl Iterator<Item = Result<Vec<Group>>> + Send {
-        let groups: Box<dyn Iterator<Item = Result<Group>> + Send> = match self.database {
-            None => Box::new(self.memory.into_iter().map(Ok)),
-            Some(database) => {
-                let entries = database.iter();
-                Box::new(entries.map(move |entry| -> Result<Group> {
-                    // The temporary database is removed when it is dropped,
-                    // so it must live as long as the iterator.
-                    let _database = &database;
-                    let (key, value_bytes) = entry?;
-                    let key = String::from_utf8_lossy(&key).to_string();
-                    let values: Vec<Value> = deserialize(&value_bytes)?;
-                    Ok((key, values))
-                }))
-            }
+        let groups: Box<dyn Iterator<Item = Result<Group>> + Send> = if self.runs.files.is_empty() {
+            Box::new(self.memory.into_iter().map(Ok))
+        } else {
+            Box::new(merge_runs(self.runs))
         };
         batches(groups, batch_size)
     }

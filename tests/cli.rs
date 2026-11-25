@@ -478,6 +478,28 @@ fn the_v8_engine_reports_a_script_that_needs_node_apis() {
 }
 
 #[test]
+fn spilling_to_disk_gives_the_same_result_and_cleans_up() {
+    let sandbox = Sandbox::new("spill");
+    let scratch = sandbox.directory.join("scratch");
+    let input: String = (0..30_000)
+        .map(|number| format!("word{} word{} common\n", number % 5_000, number % 7))
+        .collect();
+    let scratch = scratch.to_str().unwrap();
+    let in_memory = sandbox.run(&["-j", "4"], &input);
+    let spilled = sandbox.run(
+        &["-j", "4", "--memory-limit", "1", "--tmpdir", scratch],
+        &input,
+    );
+    assert_eq!(spilled.status.code(), Some(0), "{}", stderr_text(&spilled));
+    assert_eq!(stdout_lines(&spilled), stdout_lines(&in_memory));
+    assert!(stdout_lines(&spilled).contains(&"common: 30000".to_string()));
+    let leftovers = std::fs::read_dir(scratch)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(leftovers, 0, "spill files should be removed after the run");
+}
+
+#[test]
 fn invalid_utf8_input_fails() {
     let sandbox = Sandbox::new("invalid-utf8");
     let mut child = std::process::Command::new(BINARY)

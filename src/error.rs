@@ -35,7 +35,7 @@ pub enum Error {
     WriteOutput(io::Error),
 
     #[error("Group storage error: {0}")]
-    Spill(#[from] sled::Error),
+    Spill(io::Error),
 
     #[error("Serialization error: {0}")]
     Serialize(#[from] bincode::Error),

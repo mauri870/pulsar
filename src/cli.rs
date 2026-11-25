@@ -5,6 +5,7 @@ use crate::output::OutputFormat;
 use crate::runtime::Engine;
 
 const DEFAULT_CHUNK_SIZE: usize = 64;
+const DEFAULT_MEMORY_LIMIT_MB: usize = 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "pulsar")]
@@ -44,6 +45,10 @@ pub struct Cli {
     /// `--features v8`.
     #[arg(long = "engine", default_value_t = Engine::Llrt)]
     pub(crate) engine: Engine,
+
+    /// Memory in MB for grouped data before it spills to disk, divided between the group shards.
+    #[arg(long = "memory-limit", default_value_t = DEFAULT_MEMORY_LIMIT_MB)]
+    pub(crate) memory_limit_mb: usize,
 
     /// Directory for temporary files when grouped data is too large for memory and spills to disk.
     /// Defaults to the working directory.

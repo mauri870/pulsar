@@ -20,7 +20,7 @@ use crate::output::{OutputFormat, Sink, StdoutSink};
 use crate::runtime::{Engine, LlrtRuntime, ScriptRuntime, WorkerPool};
 use crate::profile;
 use crate::script::{self, Contract};
-use crate::store::{DEFAULT_MEMORY_LIMIT_BYTES, GroupStore, SpillStore};
+use crate::store::{GroupStore, SpillStore};
 use crate::value::{KeyValue, Value};
 
 #[cfg(test)]
@@ -288,6 +288,7 @@ pub struct Pulsar {
     output_format: OutputFormat,
     test: bool,
     engine: Engine,
+    memory_limit_bytes: usize,
     tmpdir: PathBuf,
     profiler: Option<profile::Profiler>,
 }
@@ -310,6 +311,7 @@ impl Pulsar {
             output_format: config.output_format,
             test: config.test,
             engine: config.engine,
+            memory_limit_bytes: config.memory_limit_bytes,
             tmpdir: config.tmpdir,
             profiler: if config.pprof {
                 Some(profile::Profiler::start())
@@ -332,7 +334,7 @@ impl Pulsar {
                 SpillStore::new(
                     self.tmpdir
                         .join(format!("pulsar-groups-{}-{}", std::process::id(), shard)),
-                    DEFAULT_MEMORY_LIMIT_BYTES / shards,
+                    self.memory_limit_bytes / shards,
                 )
             })
             .collect();

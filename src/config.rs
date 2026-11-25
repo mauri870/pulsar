@@ -27,6 +27,7 @@ pub struct Config {
     pub test: bool,
     pub workers: usize,
     pub chunk_size: usize,
+    pub memory_limit_bytes: usize,
     pub tmpdir: PathBuf,
     pub engine: Engine,
     pub pprof: bool,
@@ -49,6 +50,7 @@ impl From<Cli> for Config {
             test: cli.test,
             workers: cli.workers.unwrap_or_else(num_cpus::get_physical).max(1),
             chunk_size: cli.chunk_size.max(1),
+            memory_limit_bytes: cli.memory_limit_mb.max(1).saturating_mul(1024 * 1024),
             tmpdir: cli.tmpdir,
             engine: cli.engine,
             pprof: cli.pprof,
@@ -77,6 +79,7 @@ mod tests {
         assert!(config.workers >= 1);
         assert_eq!(config.chunk_size, 64);
         assert_eq!(config.tmpdir, PathBuf::from("."));
+        assert_eq!(config.memory_limit_bytes, 1024 * 1024 * 1024);
         assert_eq!(config.engine, Engine::Llrt);
     }
 
@@ -84,7 +87,7 @@ mod tests {
     fn explicit_settings() {
         let config = config(&[
             "-f", "in.txt", "-s", "script.js", "--sort", "--test", "-j", "3", "-c", "5",
-            "--output=json", "--pprof", "--tmpdir", "/var/tmp", "--engine", "v8",
+            "--output=json", "--pprof", "--tmpdir", "/var/tmp", "--engine", "v8", "--memory-limit", "64",
         ]);
         assert!(matches!(&config.input, InputSource::File(path) if path == "in.txt"));
         assert!(matches!(&config.script, ScriptSource::File(path) if path == "script.js"));
@@ -93,6 +96,7 @@ mod tests {
         assert_eq!(config.workers, 3);
         assert_eq!(config.chunk_size, 5);
         assert_eq!(config.tmpdir, PathBuf::from("/var/tmp"));
+        assert_eq!(config.memory_limit_bytes, 64 * 1024 * 1024);
         assert_eq!(config.engine, Engine::V8);
     }
 
@@ -106,6 +110,11 @@ mod tests {
         let config = config(&["-j", "0", "-c", "0"]);
         assert_eq!(config.workers, 1);
         assert_eq!(config.chunk_size, 1);
+    }
+
+    #[test]
+    fn the_memory_limit_is_at_least_one_megabyte() {
+        assert_eq!(config(&["--memory-limit", "0"]).memory_limit_bytes, 1024 * 1024);
     }
 
     #[test]

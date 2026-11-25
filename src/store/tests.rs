@@ -82,7 +82,7 @@ fn spill_store_stays_in_memory_below_the_limit() {
     let mut store = SpillStore::new(directory.clone(), usize::MAX);
     fill(&mut store);
     assert_eq!(store.key_count(), 3);
-    assert!(!directory.exists(), "no database should have been created");
+    assert!(!directory.exists(), "no run file should have been created");
     assert_eq!(normalized(all_groups(store)), expected());
 }
 
@@ -92,8 +92,8 @@ fn spill_store_merges_groups_across_spills() {
     // A limit of one byte spills after every batch.
     let mut store = SpillStore::new(directory.clone(), 1);
     fill(&mut store);
-    assert!(store.database.is_some(), "the store should have spilled");
-    assert_eq!(store.key_count(), 3);
+    assert!(!store.runs.files.is_empty(), "the store should have spilled");
+    assert!(store.key_count() >= 3, "a spilled key may be counted once per run");
     assert_eq!(normalized(all_groups(store)), expected());
 }
 
@@ -105,12 +105,12 @@ fn spill_store_flushes_what_is_left_in_memory_when_finished() {
     let one_group = new_group_bytes("a") + Value::Int(1).estimated_size();
     let mut store = SpillStore::new(directory.clone(), one_group * 3 + 1);
     store.add(pairs(&[("a", 1), ("b", 2), ("c", 3), ("d", 4)])).unwrap();
-    assert!(store.database.is_some(), "the first batch should have spilled");
+    assert!(!store.runs.files.is_empty(), "the first batch should have spilled");
     store.add(pairs(&[("a", 5)])).unwrap();
     assert_eq!(store.memory.len(), 1, "the second batch should stay in memory");
     store.finish().unwrap();
     assert!(store.memory.is_empty());
-    assert_eq!(store.key_count(), 4);
+    assert_eq!(store.key_count(), 5, "`a` is in two runs and counted in both");
     assert_eq!(
         normalized(all_groups(store)),
         vec![
@@ -129,7 +129,7 @@ fn spill_store_removes_its_directory() {
     fill(&mut store);
     assert!(directory.exists());
     all_groups(store);
-    assert!(!directory.exists(), "the temporary database should be removed");
+    assert!(!directory.exists(), "the run files should be removed");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn spill_store_counts_the_size_of_values() {
     store
         .add(vec![KeyValue { key: "k".to_string(), value: large }])
         .unwrap();
-    assert!(store.database.is_some(), "a single large value should spill");
+    assert!(!store.runs.files.is_empty(), "a single large value should spill");
     assert_eq!(store.memory_bytes, 0);
 }
 
@@ -184,7 +184,7 @@ fn spill_store_hands_out_groups_in_batches_from_memory_and_from_disk() {
 
     let mut on_disk = SpillStore::new(unique_directory("batches-disk"), 1);
     many_groups(&mut on_disk, 7);
-    assert!(on_disk.database.is_some());
+    assert!(!on_disk.runs.files.is_empty());
     assert_eq!(batch_sizes(on_disk, 3), [3, 3, 1]);
 }
 
@@ -195,14 +195,71 @@ fn an_empty_store_has_no_batches() {
 }
 
 #[test]
-fn spill_store_keeps_its_database_until_the_batches_are_consumed() {
+fn spill_store_keeps_its_runs_until_the_batches_are_consumed() {
     let directory = unique_directory("lazy");
     let mut store = SpillStore::new(directory.clone(), 1);
     many_groups(&mut store, 5);
     let mut batches = store.into_batches(2);
-    assert!(directory.exists(), "the database must outlive into_batches");
+    assert!(directory.exists(), "the run files must outlive into_batches");
     assert_eq!(batches.next().unwrap().unwrap().len(), 2);
     assert!(directory.exists());
     drop(batches);
-    assert!(!directory.exists(), "the database is removed with the iterator");
+    assert!(!directory.exists(), "the run files are removed with the iterator");
+}
+
+#[test]
+fn a_hot_key_spilled_many_times_comes_out_as_one_group() {
+    let directory = unique_directory("hot-key");
+    let mut store = SpillStore::new(directory, 1);
+    for number in 0..50 {
+        store.add(pairs(&[("hot", number), ("cold", number)])).unwrap();
+    }
+    store.finish().unwrap();
+    assert_eq!(store.runs.files.len(), 50, "every batch should have spilled");
+    let groups = normalized(all_groups(store));
+    assert_eq!(groups.len(), 2);
+    let expected_values: Vec<i64> = (0..50).collect();
+    assert_eq!(groups[0], ("cold".to_string(), expected_values.clone()));
+    assert_eq!(groups[1], ("hot".to_string(), expected_values));
+}
+
+#[test]
+fn merged_groups_come_out_in_key_order() {
+    let directory = unique_directory("key-order");
+    let mut store = SpillStore::new(directory, 1);
+    store.add(pairs(&[("m", 1), ("z", 2), ("a", 3)])).unwrap();
+    store.add(pairs(&[("b", 4), ("z", 5)])).unwrap();
+    store.finish().unwrap();
+    let keys: Vec<String> = store
+        .into_batches(100)
+        .map(|batch| batch.unwrap())
+        .flatten()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, ["a", "b", "m", "z"]);
+}
+
+#[test]
+fn a_truncated_run_file_is_an_error_not_missing_data() {
+    let directory = unique_directory("truncated");
+    let mut store = SpillStore::new(directory, 1);
+    store.add(pairs(&[("a", 1), ("b", 2), ("c", 3)])).unwrap();
+    store.finish().unwrap();
+    let path = store.runs.files[0].0.clone();
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+    let outcome: Result<Vec<_>> = store.into_batches(10).collect();
+    assert!(outcome.is_err(), "reading a truncated run must fail");
+}
+
+#[test]
+fn spill_store_creates_a_missing_directory_and_removes_it() {
+    let parent = unique_directory("nested-parent");
+    let directory = parent.join("inner").join("groups");
+    let mut store = SpillStore::new(directory.clone(), 1);
+    fill(&mut store);
+    assert!(directory.exists());
+    drop(store);
+    assert!(!directory.exists(), "the run files and their directory are removed");
+    let _ = std::fs::remove_dir_all(&parent);
 }
