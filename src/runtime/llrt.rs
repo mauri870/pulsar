@@ -1,10 +1,11 @@
 use llrt_core::vm::Vm;
 use rquickjs::{CatchResultExt, Coerced};
-use rquickjs::{Function, async_with, prelude::Promise};
+use rquickjs::{Ctx, Function, Object, async_with, prelude::Promise};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::runtime::ScriptRuntime;
+use crate::script::Contract;
 use crate::value::{KeyValue, Value};
 
 impl<'js> llrt_core::IntoJs<'js> for Value {
@@ -108,46 +109,53 @@ impl<'js> llrt_core::IntoJs<'js> for KeyValue {
     }
 }
 
-/// Defines the functions the engine calls. They run in the same scope as the
-/// user script, which can define `map`, `combine`, `reduce` and `sort`.
+/// Name of the global object that holds the engine's own functions, so they
+/// cannot collide with names defined by the user script.
+const ENGINE_GLOBAL: &str = "__pulsar";
+
+/// Installs the engine's functions. It runs after the user script, which can
+/// define `map`, `combine`, `reduce` and `sort`; those are looked up in the
+/// script's scope when the functions are called.
 const WRAPPER: &str = r#"
-const mapBatch = async (lines) => {
-    if (typeof map !== 'function') {
-        throw new Error('map function is not defined');
-    }
-    const results = await Promise.all(lines.map(async (line) => {
-        try {
-            let pairs = await map(line);
-            if (typeof combine === 'function') {
-                pairs = await combine(pairs);
-            }
-            return pairs;
-        } catch (error) {
-            throw new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
-        }
-    }));
-    return results.flat(1);
-};
+globalThis.__pulsar = (() => {
+    const hasCombine = typeof combine === 'function';
 
-const flatReduce = async (batch) => {
-    if (typeof reduce !== 'function') {
-        throw new Error('Reduce function is not defined');
-    }
-
-    const results = await Promise.all(
-        batch.map(async ([key, values]) => {
+    const mapBatch = async (lines) => {
+        const results = await Promise.all(lines.map(async (line) => {
             try {
-                const reduced = await reduce(key, values);
-                return [key, reduced];
+                let pairs = await map(line);
+                if (hasCombine) {
+                    pairs = await combine(pairs);
+                }
+                return pairs;
             } catch (error) {
-                throw new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
+                throw new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
             }
-        })
-    );
+        }));
+        return results.flat(1);
+    };
 
-    return results;
-};
+    const reduceBatch = async (batch) => {
+        return await Promise.all(
+            batch.map(async ([key, values]) => {
+                try {
+                    const reduced = await reduce(key, values);
+                    return [key, reduced];
+                } catch (error) {
+                    throw new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
+                }
+            })
+        );
+    };
+
+    return { mapBatch, reduceBatch };
+})();
 "#;
+
+/// Looks up one of the engine's functions.
+fn engine_function<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Function<'js>> {
+    ctx.globals().get::<_, Object>(ENGINE_GLOBAL)?.get(name)
+}
 
 /// The llrt (QuickJS) implementation of [`ScriptRuntime`].
 pub struct LlrtRuntime {
@@ -155,15 +163,32 @@ pub struct LlrtRuntime {
 }
 
 impl ScriptRuntime for LlrtRuntime {
-    async fn load(script: &str) -> Result<Self> {
+    async fn load(script: &str, contract: &Contract) -> Result<Self> {
         let vm = Vm::new()
             .await
             .map_err(|e| Error::Worker(format!("Failed to create VM: {}", e)))?;
 
-        let source = format!("{}\n{}", WRAPPER, script);
+        let required = contract.required_functions();
         vm.ctx
             .with(|ctx| {
-                ctx.eval::<(), _>(source)
+                ctx.eval::<(), _>(script)
+                    .catch(&ctx)
+                    .map_err(|e| Error::ScriptLoad(e.to_string()))?;
+
+                for name in required {
+                    let defined: bool = ctx
+                        .eval(format!("typeof {} === 'function'", name))
+                        .catch(&ctx)
+                        .map_err(|e| Error::ScriptLoad(e.to_string()))?;
+                    if !defined {
+                        return Err(Error::ScriptContract(format!(
+                            "the script must define a `{}` function",
+                            name
+                        )));
+                    }
+                }
+
+                ctx.eval::<(), _>(WRAPPER)
                     .catch(&ctx)
                     .map_err(|e| Error::ScriptLoad(e.to_string()))
             })
@@ -174,9 +199,7 @@ impl ScriptRuntime for LlrtRuntime {
 
     async fn map_batch(&self, lines: Vec<String>) -> Result<Vec<KeyValue>> {
         async_with!(self.vm.ctx => |ctx| {
-            let map_fn = ctx.globals()
-                .get::<_, Function>("mapBatch")
-                .or_else(|_| ctx.eval("mapBatch"))
+            let map_fn = engine_function(&ctx, "mapBatch")
                 .map_err(|e| Error::Map(format!("map function not found: {}", e)))?;
             let promise: Promise = map_fn
                 .call((lines,))
@@ -194,9 +217,7 @@ impl ScriptRuntime for LlrtRuntime {
 
     async fn reduce_batch(&self, groups: Vec<(String, Vec<Value>)>) -> Result<Vec<KeyValue>> {
         async_with!(self.vm.ctx => |ctx| {
-            let reduce_fn = ctx.globals()
-                .get::<_, Function>("flatReduce")
-                .or_else(|_| ctx.eval("flatReduce"))
+            let reduce_fn = engine_function(&ctx, "reduceBatch")
                 .map_err(|e| Error::Reduce(format!("reduce function not found: {}", e)))?;
             let batch: Vec<KeyValue> = groups
                 .into_iter()

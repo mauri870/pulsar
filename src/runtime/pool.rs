@@ -3,6 +3,7 @@ use tokio::sync::oneshot;
 
 use super::ScriptRuntime;
 use crate::error::{Error, Result};
+use crate::script::Contract;
 use crate::value::{KeyValue, Value};
 
 type Reply<T> = oneshot::Sender<Result<T>>;
@@ -23,8 +24,13 @@ pub struct WorkerPool {
 
 impl WorkerPool {
     /// Starts `workers` threads, each loading `script` into its own runtime
-    /// of type `R`, and waits until all of them are ready.
-    pub async fn start<R: ScriptRuntime + 'static>(script: &str, workers: usize) -> Result<Self> {
+    /// of type `R` and checking it against `contract`, and waits until all
+    /// of them are ready.
+    pub async fn start<R: ScriptRuntime + 'static>(
+        script: &str,
+        contract: Contract,
+        workers: usize,
+    ) -> Result<Self> {
         let (jobs, job_receiver) = flume::bounded(workers);
         let mut threads = Vec::with_capacity(workers);
         let mut ready_receivers = Vec::with_capacity(workers);
@@ -35,7 +41,7 @@ impl WorkerPool {
             let script = script.to_owned();
             let job_receiver = job_receiver.clone();
             threads.push(thread::spawn(move || {
-                run_worker::<R>(script, job_receiver, ready_sender)
+                run_worker::<R>(script, contract, job_receiver, ready_sender)
             }));
         }
         drop(job_receiver);
@@ -102,6 +108,7 @@ fn fail_startup(ready: Reply<()>, error: Error) -> Result<()> {
 
 fn run_worker<R: ScriptRuntime>(
     script: String,
+    contract: Contract,
     jobs: flume::Receiver<Job>,
     ready: Reply<()>,
 ) -> Result<()> {
@@ -119,7 +126,7 @@ fn run_worker<R: ScriptRuntime>(
     };
 
     runtime.block_on(async move {
-        let script_runtime = match R::load(&script).await {
+        let script_runtime = match R::load(&script, &contract).await {
             Ok(script_runtime) => script_runtime,
             Err(error) => return fail_startup(ready, error),
         };

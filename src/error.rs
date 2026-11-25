@@ -16,6 +16,9 @@ pub enum Error {
     #[error("Error loading JS code: {0}")]
     ScriptLoad(String),
 
+    #[error("Invalid script: {0}")]
+    ScriptContract(String),
+
     #[error("{0}")]
     Map(String),
 

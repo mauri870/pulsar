@@ -9,13 +9,15 @@ pub use llrt::LlrtRuntime;
 pub use pool::WorkerPool;
 
 use crate::error::Result;
+use crate::script::Contract;
 use crate::value::{KeyValue, Value};
 
 /// One script runtime instance. It is created on the thread that uses it and
 /// never shared between threads.
 pub(crate) trait ScriptRuntime: Sized {
-    /// Creates the runtime and loads the user script into it.
-    async fn load(script: &str) -> Result<Self>;
+    /// Creates the runtime, loads the user script into it and checks that it
+    /// defines the functions the contract requires.
+    async fn load(script: &str, contract: &Contract) -> Result<Self>;
 
     /// Runs `map` on every line of the batch, concurrently, and returns all
     /// the pairs it produced.

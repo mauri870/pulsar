@@ -259,7 +259,7 @@ fn missing_map_function_fails() {
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "x\n");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(stderr_text(&output).contains("map function is not defined"));
+    assert!(stderr_text(&output).contains("the script must define a `map` function"));
 }
 
 #[test]
@@ -269,7 +269,7 @@ fn missing_reduce_function_fails() {
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "x\n");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(stderr_text(&output).contains("Reduce function is not defined"));
+    assert!(stderr_text(&output).contains("the script must define a `reduce` function"));
 }
 
 #[test]
@@ -315,7 +315,46 @@ fn sort_without_a_sort_function_fails() {
     let output = sandbox.run(&["-s", script.to_str().unwrap(), "--sort"], "ab\ncd\n");
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(stderr_text(&output).contains("sort function not found"));
+    assert!(stderr_text(&output).contains("the script must define a `sort` function"));
+}
+
+#[test]
+fn test_mode_requires_a_test_function() {
+    let sandbox = Sandbox::new("test-missing");
+    let script = sandbox.write("notest.js", PASS_THROUGH);
+    let output = sandbox.run(&["-s", script.to_str().unwrap(), "--test"], "");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr_text(&output).contains("the script must define a `test` function"));
+}
+
+#[test]
+fn optional_functions_are_not_required() {
+    let sandbox = Sandbox::new("optional-functions");
+    let script = sandbox.write("plain.js", PASS_THROUGH);
+    let output = sandbox.run(&["-s", script.to_str().unwrap()], "ab\ncd\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout_lines(&output), ["ab: 2", "cd: 2"]);
+}
+
+#[test]
+fn user_names_cannot_collide_with_the_engine() {
+    let sandbox = Sandbox::new("name-collision");
+    let script = sandbox.write(
+        "collide.js",
+        "\
+const mapBatch = 'mine';
+const reduceBatch = 'mine';
+const flatReduce = 'mine';
+const runMapWorker = 'mine';
+const hasCombine = 'mine';
+var __pulsar = undefined;
+const map = async line => [[line, 1]];
+const reduce = async (key, values) => values.length;
+",
+    );
+    let output = sandbox.run(&["-s", script.to_str().unwrap()], "a\nb\na\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    assert_eq!(stdout_lines(&output), ["a: 2", "b: 1"]);
 }
 
 #[test]

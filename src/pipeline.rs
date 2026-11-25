@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 use crate::input::InputReader;
 use crate::output::OutputFormat;
 use crate::runtime::{LlrtRuntime, WorkerPool};
+use crate::script::Contract;
 use crate::value::{KeyValue, Value};
 use crate::{input, output, profile, script};
 use std::fmt::Debug;
@@ -95,7 +96,8 @@ impl Pulsar<InputReader> {
 
     #[instrument(level = "trace")]
     pub async fn run_tests(&self) -> Result<()> {
-        let pool = WorkerPool::start::<LlrtRuntime>(&self.script, 1).await?;
+        let contract = Contract { sort: false, test: true };
+        let pool = WorkerPool::start::<LlrtRuntime>(&self.script, contract, 1).await?;
         pool.test().await?;
         pool.shutdown()?;
         println!("OK");
@@ -106,7 +108,9 @@ impl Pulsar<InputReader> {
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = self.workers;
         info!("Starting pulsar engine with {} CPU workers", n_cpus);
-        let pool = Arc::new(WorkerPool::start::<LlrtRuntime>(&self.script, n_cpus).await?);
+        let contract = Contract { sort: self.sort, test: false };
+        let pool =
+            Arc::new(WorkerPool::start::<LlrtRuntime>(&self.script, contract, n_cpus).await?);
         info!("Successfully started {} JS VM workers", n_cpus);
 
         // aggregate map results — one Vec<KeyValue> per mapped batch of lines
