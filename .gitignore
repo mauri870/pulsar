@@ -17,3 +17,6 @@ profile.perf
 
 # spill directories left by an interrupted run
 pulsar-groups-*/
+
+# benchmark inputs
+bench/data/
