@@ -1,7 +1,10 @@
 mod cli;
 mod config;
+mod input;
 mod js;
 mod output;
+mod profile;
+mod script;
 
 pub use cli::Cli;
 pub use config::Config;
@@ -11,7 +14,7 @@ use futures::stream::StreamExt;
 use js::{JobRequest, JobResult};
 use std::{collections::HashMap, sync::atomic::AtomicUsize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufWriter},
     sync::oneshot,
     task::JoinHandle,
 };
@@ -19,12 +22,10 @@ use tokio_stream::wrappers::LinesStream;
 use tracing::{debug, error, info};
 
 use anyhow::Result;
-use config::{InputSource, ScriptSource};
+use input::InputReader;
 use output::OutputFormat;
 use std::fmt::Debug;
 use tracing::instrument;
-
-const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
 
 fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
     let mut values: Vec<js::Value> = old_value
@@ -60,34 +61,16 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     test: bool,
     workers: usize,
     chunk_size: usize,
-    pprof_guard: Option<pprof2::ProfilerGuard<'static>>,
+    profiler: Option<profile::Profiler>,
 }
 
-impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
+impl Pulsar<InputReader> {
     /// Create a new Pulsar instance from a configuration, opening the input
     /// and reading the script.
     #[instrument(level = "trace")]
     pub async fn from_config(config: Config) -> Result<Self> {
-        let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
-            match &config.input {
-                InputSource::Stdin => {
-                    let stdin = tokio::io::stdin();
-                    BufReader::new(Box::new(stdin))
-                }
-                InputSource::File(path) => {
-                    let file = tokio::fs::File::open(path)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path, e))?;
-                    BufReader::new(Box::new(file))
-                }
-            };
-
-        let script = match &config.script {
-            ScriptSource::File(path) => tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", path, e))?,
-            ScriptSource::Default => DEFAULT_SCRIPT.into(),
-        };
+        let reader = input::open(&config.input).await?;
+        let script = script::load(&config.script).await?;
         Ok(Pulsar {
             reader,
             script,
@@ -96,8 +79,8 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
             test: config.test,
             workers: config.workers,
             chunk_size: config.chunk_size,
-            pprof_guard: if config.pprof {
-                Some(pprof2::ProfilerGuard::new(999).unwrap())
+            profiler: if config.pprof {
+                Some(profile::Profiler::start())
             } else {
                 None
             },
@@ -300,7 +283,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                                 output.len()
                             );
                             for kv in output {
-                                Self::format_and_print_result(
+                                output::write_result(
                                     &kv.key,
                                     &kv.value,
                                     &output_format,
@@ -315,7 +298,7 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
                     info!("Writing results without sorting");
                     while let Some(kv) = reduce_rx.recv().await {
                         result_count += 1;
-                        Self::format_and_print_result(
+                        output::write_result(
                             &kv.key,
                             &kv.value,
                             &output_format,
@@ -398,46 +381,13 @@ impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
         let _ = reduce_consumer.await;
         info!("Pulsar processing completed successfully");
 
-        if let Some(guard) = self.pprof_guard {
-            if let Ok(report) = guard.report().build() {
-                use pprof2::protos::Message;
-                use std::io::Write;
-                let profile = report.pprof()?;
-                let mut content = Vec::new();
-                profile.encode(&mut content)?;
-                let mut file = std::fs::File::create("pprof.pb")?;
-                file.write_all(&content)?;
-            }
+        if let Some(profiler) = self.profiler {
+            profiler.write_report()?;
         }
 
         Ok(())
     }
 
-    /// Format and print a single result
-    #[instrument(level = "trace", skip(writer))]
-    async fn format_and_print_result(
-        key: &str,
-        result: &js::Value,
-        output_format: &OutputFormat,
-        writer: &mut BufWriter<tokio::io::Stdout>,
-    ) {
-        match output_format {
-            OutputFormat::Plain => {
-                let _ = writer
-                    .write_all(format!("{}: {}\n", key, result.to_string()).as_bytes())
-                    .await;
-            }
-            OutputFormat::Json => {
-                let val = serde_json::Value::from(result);
-                let _ = writer
-                    .write_all(format!("{}\n", serde_json::json!({ key: val })).as_bytes())
-                    .await;
-            }
-        }
-
-        // Use tokio's async version of flush
-        let _ = tokio::io::stdout().flush().await;
-    }
 }
 
 impl<R: AsyncBufReadExt + Unpin> Debug for Pulsar<R> {

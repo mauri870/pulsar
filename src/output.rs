@@ -1,5 +1,7 @@
 use clap::ValueEnum;
 use std::fmt::Display;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tracing::instrument;
 
 #[derive(Debug, Clone, ValueEnum, Default)]
 pub enum OutputFormat {
@@ -15,4 +17,30 @@ impl Display for OutputFormat {
             OutputFormat::Json => write!(f, "json"),
         }
     }
+}
+
+/// Format and print a single result
+#[instrument(level = "trace", skip(writer))]
+pub async fn write_result(
+    key: &str,
+    result: &crate::js::Value,
+    output_format: &OutputFormat,
+    writer: &mut BufWriter<tokio::io::Stdout>,
+) {
+    match output_format {
+        OutputFormat::Plain => {
+            let _ = writer
+                .write_all(format!("{}: {}\n", key, result.to_string()).as_bytes())
+                .await;
+        }
+        OutputFormat::Json => {
+            let val = serde_json::Value::from(result);
+            let _ = writer
+                .write_all(format!("{}\n", serde_json::json!({ key: val })).as_bytes())
+                .await;
+        }
+    }
+
+    // Use tokio's async version of flush
+    let _ = tokio::io::stdout().flush().await;
 }
