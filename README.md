@@ -2,13 +2,13 @@
 
 `pulsar` is a high-performance MapReduce engine for processing large datasets using user-defined JavaScript functions. It follows the standard Unix philosophy, reads from stdin or a file, writes to stdout, and composes naturally with other tools via pipes.
 
-Features include ES2023 JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine based on [QuickJS](https://bellard.org/quickjs/), pull-based work-stealing scheduler, streaming input/output, automatically spills to disk if intermediate data is too large, NDJSON output, sorting and an embedded test runner.
+Features include ES2023 JavaScript support via [Amazon AWS's LLRT](https://github.com/awslabs/llrt) engine based on [QuickJS](https://bellard.org/quickjs/), batched work distribution over a pool of JS workers, streaming input/output, automatically spills to disk (see `--tmpdir`) if intermediate data is too large, NDJSON output, sorting and an embedded test runner.
 
 Define `map`, `combine`, `reduce`, `sort`, and `test` as async functions in your script. The engine handles parallelism, work distribution, grouping, and orchestration. In the diagrams below, lighter sections represent your script and darker sections represent the engine:
 
-### Map phase — pull-based scheduler
+### Map phase — batches over a worker pool
 
-Each JS worker thread runs `N` concurrent async ticks (controlled by `--chunk-size`, default 64). Every tick loops independently: it pulls the next line from a shared bounded channel, calls `map` (and optionally `combine`), sends the results, then immediately pulls the next line. Workers never wait on each other — a fast worker simply pulls more items. This gives implicit work-stealing with no coordination overhead: the shared channel is the only synchronisation point.
+The input is cut into batches of `--chunk-size` lines (default 64) and handed to a pool of JS worker threads, each with its own VM. A free worker takes the next batch from the shared job queue, runs `map` on every line of the batch concurrently in a single call, then runs `combine` (if defined) once over the pairs of the whole batch and sends the result on to grouping. Workers never wait on each other: a fast worker simply takes more batches. A few batches per worker are in flight at a time, so the job queue is the only synchronisation point and a slow consumer slows down the reader.
 
 ```mermaid
 flowchart LR
@@ -16,21 +16,21 @@ flowchart LR
   subgraph pulsar["Pulsar"]
     direction TB
     pi([Input]) --> ch
-    ch[(Line Channel)]
+    ch[(Job Queue)]
     subgraph sched["Scheduler"]
       direction LR
       subgraph w1["Thread 1 (JS VM)"]
-        mc1["map / combine ×N"]
+        mc1["map / combine"]
       end
       subgraph w2["Thread 2 (JS VM)"]
-        mc2["map / combine ×N"]
+        mc2["map / combine"]
       end
       subgraph wn["Thread N (JS VM)"]
-        mcn["map / combine ×N"]
+        mcn["map / combine"]
       end
       mc1 ~~~ mc2 ~~~ mcn
     end
-    ch -->|pull| sched
+    ch -->|batch| sched
     sched --> group["Group"] --> reduce["reduce"] --> sort["Sort (optional)"] --> po([Output])
   end
 
@@ -71,6 +71,8 @@ By default, if no script is provided, it performs a simple word count. See [`def
 pulsar -f input_file -s script_file
 pulsar -h
 ```
+
+`map`, `reduce`, `combine`, `sort` and `test` can be plain or `async` functions. `map` and `reduce` are required, `sort` is required with `--sort` and `test` with `--test`; a missing one is reported before any input is read. If the script fails to load, a function throws, or the input cannot be read, pulsar prints the error and exits with status 1. Errors in `map` name the input line and errors in `reduce` name the key.
 
 ## Examples
 
