@@ -1,0 +1,388 @@
+use bincode::{deserialize, serialize};
+use futures::stream::StreamExt;
+use crate::js::{JobRequest, JobResult};
+use std::{collections::HashMap, sync::atomic::AtomicUsize};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufWriter},
+    sync::oneshot,
+    task::JoinHandle,
+};
+use tokio_stream::wrappers::LinesStream;
+use tracing::{debug, error, info};
+
+use anyhow::Result;
+use crate::config::Config;
+use crate::input::InputReader;
+use crate::output::OutputFormat;
+use crate::{input, js, output, profile, script};
+use std::fmt::Debug;
+use tracing::instrument;
+
+fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut values: Vec<js::Value> = old_value
+        .and_then(|bytes| deserialize(bytes).ok())
+        .unwrap_or_default();
+    let new_values: Vec<js::Value> = deserialize(new_bytes).unwrap_or_default();
+    values.extend(new_values);
+    serialize(&values).ok()
+}
+
+const MAX_GROUPING_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
+
+const HASHMAP_SLOT_SIZE: usize = {
+    let size = std::mem::size_of::<(String, Vec<js::Value>)>();
+    let align = {
+        let a = std::mem::align_of::<(String, Vec<js::Value>)>();
+        let b = std::mem::align_of::<usize>();
+        if a > b { a } else { b }
+    };
+    (size / align) * align
+};
+
+enum GroupStorage {
+    Memory(HashMap<String, Vec<js::Value>>),
+    Sled(sled::Db),
+}
+
+pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
+    reader: R,
+    script: String,
+    sort: bool,
+    output_format: OutputFormat,
+    test: bool,
+    workers: usize,
+    chunk_size: usize,
+    profiler: Option<profile::Profiler>,
+}
+
+impl Pulsar<InputReader> {
+    /// Create a new Pulsar instance from a configuration, opening the input
+    /// and reading the script.
+    #[instrument(level = "trace")]
+    pub async fn from_config(config: Config) -> Result<Self> {
+        let reader = input::open(&config.input).await?;
+        let script = script::load(&config.script).await?;
+        Ok(Pulsar {
+            reader,
+            script,
+            output_format: config.output_format,
+            sort: config.sort,
+            test: config.test,
+            workers: config.workers,
+            chunk_size: config.chunk_size,
+            profiler: if config.pprof {
+                Some(profile::Profiler::start())
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Run the application with streaming and optimized processing
+    #[instrument(level = "trace")]
+    pub async fn run(self) -> Result<()> {
+        if self.test {
+            return self.run_tests().await;
+        }
+
+        self.run_engine().await?;
+        Ok(())
+    }
+
+    #[instrument(level = "trace")]
+    pub async fn run_tests(&self) -> Result<()> {
+        js::run_test_file(self.script.clone())?;
+        println!("OK");
+        Ok(())
+    }
+
+    #[instrument(level = "trace")]
+    pub async fn run_engine(self) -> Result<()> {
+        let n_cpus = self.workers;
+        info!("Starting pulsar engine with {} CPU workers", n_cpus);
+        let (worker_tx, worker_rx) = flume::bounded(self.chunk_size);
+        let mut init_rxs = Vec::with_capacity(n_cpus);
+
+        for idx in 0..n_cpus {
+            let (init_tx, init_rx) = oneshot::channel();
+            init_rxs.push(init_rx);
+            if let Err(e) = js::start_vm_worker(self.script.clone(), worker_rx.clone(), init_tx) {
+                error!("Failed to start JS VM worker {}: {}", idx, e);
+                return Err(e.into());
+            }
+        }
+        // Drop the original so the channel closes when all workers exit
+        drop(worker_rx);
+
+        // Wait for all workers to finish JS initialisation before proceeding.
+        // This adds a startup delay but ensures we don't get trapped in a deadlock.
+        for init_rx in init_rxs {
+            match init_rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Ok(()),
+            }
+        }
+        info!("Successfully started {} JS VM workers", n_cpus);
+
+        // aggregate map results — workers send one Vec<KeyValue> per input line
+        let (map_result_tx, map_result_rx) =
+            tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(n_cpus * self.chunk_size);
+        let map_consumer: JoinHandle<Result<GroupStorage>> = tokio::spawn(async move {
+            let mut map_result_rx = map_result_rx;
+            let mut overflow_db: Option<sled::Db> = None;
+            let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
+            let mut total_processed = 0;
+
+            while let Some(kvs) = map_result_rx.recv().await {
+                total_processed += kvs.len();
+                for kv in kvs {
+                    hashmap.entry(kv.key).or_insert_with(Vec::new).push(kv.value);
+                }
+
+                // check if we need to spill to disk
+                if HASHMAP_SLOT_SIZE * hashmap.capacity() >= MAX_GROUPING_HEAP_BYTES {
+                    info!(
+                        "Flushing {} entries to DB, total processed: {}",
+                        hashmap.len(),
+                        total_processed
+                    );
+                    let db = match overflow_db {
+                        Some(ref db) => db,
+                        None => {
+                            let db = sled::Config::default()
+                                .path("pulsar_groups")
+                                .temporary(true)
+                                .open()?;
+                            db.set_merge_operator(merge_values);
+                            overflow_db = Some(db);
+                            overflow_db.as_ref().unwrap()
+                        }
+                    };
+                    for (key, values) in hashmap.drain() {
+                        let values_bytes = serialize(&values)
+                            .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+                        db.merge(key.as_bytes(), values_bytes)?;
+                    }
+                }
+            }
+
+            info!(
+                "Group phase completed, total key-value pairs processed: {}",
+                total_processed
+            );
+
+            if let Some(db) = overflow_db {
+                if !hashmap.is_empty() {
+                    info!("Final flush of {} remaining entries to DB", hashmap.len());
+                    for (key, values) in hashmap.drain() {
+                        let values_bytes = serialize(&values)
+                            .map_err(|e| anyhow::anyhow!("Serialization error: {}", e))?;
+                        db.merge(key.as_bytes(), values_bytes)?;
+                    }
+                }
+                Ok(GroupStorage::Sled(db))
+            } else {
+                Ok(GroupStorage::Memory(hashmap))
+            }
+        });
+
+        // map phase: dispatch RunMapPhase to each worker, then stream lines into the shared channel
+        info!("Starting map phase");
+        let (map_item_tx, map_item_rx) = flume::bounded::<String>(n_cpus * self.chunk_size);
+
+        let mut map_done_rxs = Vec::with_capacity(n_cpus);
+        for _ in 0..n_cpus {
+            let (done_tx, done_rx) = oneshot::channel::<anyhow::Result<()>>();
+            map_done_rxs.push(done_rx);
+            worker_tx
+                .send_async(JobRequest::RunMapPhase {
+                    item_rx: map_item_rx.clone(),
+                    result_tx: map_result_tx.clone(),
+                    concurrency: self.chunk_size,
+                    done_tx,
+                })
+                .await?;
+        }
+        drop(map_item_rx);
+        drop(map_result_tx); // workers hold the remaining Sender clones
+
+        let mut lines = LinesStream::new(self.reader.lines());
+        while let Some(line_res) = lines.next().await {
+            match line_res {
+                Ok(line) => {
+                    if map_item_tx.send_async(line).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => eprintln!("Error reading line: {}", e),
+            }
+        }
+        drop(map_item_tx); // closing the channel signals workers: no more items
+
+        // Wait for all map workers to finish and drop their result_tx clones;
+        // once they do, map_result_rx closes and map_consumer terminates.
+        for done_rx in map_done_rxs {
+            match done_rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error!("Map worker error: {}", e),
+                Err(e) => error!("Map worker channel error: {}", e),
+            }
+        }
+
+        // group phase
+        info!("Map phase completed, starting group phase");
+        let groups = map_consumer.await??;
+        info!(
+            "Group phase completed, {} total keys",
+            match &groups {
+                GroupStorage::Memory(m) => m.len(),
+                GroupStorage::Sled(db) => db.len(),
+            }
+        );
+
+        // aggregate reduce results
+        info!("Starting reduce result aggregation phase");
+        let (reduce_tx, mut reduce_rx) = tokio::sync::mpsc::channel(self.chunk_size);
+        let reduce_consumer = tokio::spawn({
+            let output_format = self.output_format.clone();
+            let sort = self.sort;
+            let worker_tx = worker_tx.clone();
+            async move {
+                info!("Starting output writer task");
+                let stdout = tokio::io::stdout();
+                let mut writer = BufWriter::new(stdout);
+                let mut result_count = 0;
+
+                if sort {
+                    info!("Collecting results for sorting");
+                    let mut results = Vec::new();
+                    while let Some(kv) = reduce_rx.recv().await {
+                        results.push(kv);
+                        result_count += 1;
+                    }
+                    info!(
+                        "Collected {} results, starting sort operation",
+                        result_count
+                    );
+
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let _ = worker_tx.send_async(JobRequest::Sort(results, resp_tx)).await;
+                    match resp_rx.await {
+                        Ok(JobResult::SortSuccess(output)) => {
+                            info!(
+                                "Sort operation completed, writing {} sorted results",
+                                output.len()
+                            );
+                            for kv in output {
+                                output::write_result(
+                                    &kv.key,
+                                    &kv.value,
+                                    &output_format,
+                                    &mut writer,
+                                )
+                                .await;
+                            }
+                        }
+                        _ => error!("Sort error"),
+                    }
+                } else {
+                    info!("Writing results without sorting");
+                    while let Some(kv) = reduce_rx.recv().await {
+                        result_count += 1;
+                        output::write_result(
+                            &kv.key,
+                            &kv.value,
+                            &output_format,
+                            &mut writer,
+                        )
+                        .await;
+                    }
+                    info!("Wrote {} results to output", result_count);
+                }
+
+                let _ = writer.flush().await;
+            }
+        });
+
+        // reduce phase
+        info!("Starting reduce phase");
+        let task_idx = AtomicUsize::new(0);
+        let reduce_entries: Vec<(String, Vec<js::Value>)> = match groups {
+            GroupStorage::Memory(hashmap) => hashmap.into_iter().collect(),
+            GroupStorage::Sled(db) => db.iter()
+                .filter_map(|res| {
+                    match res {
+                        Ok((key, value)) => Some((key, value)),
+                        Err(e) => {
+                            eprintln!("Error iterating sled db: {}", e);
+                            None
+                        }
+                    }
+                })
+                .map(|(k, value_bytes)| {
+                    let key: String = String::from_utf8_lossy(&k).to_string();
+                    let values: Vec<js::Value> = deserialize(&value_bytes).unwrap_or_else(|e| {
+                        error!(
+                            "Failed to deserialize DB value for key '{:?}': {}. Discarding corrupted data.",
+                            &k,
+                            e
+                        );
+                        Vec::new()
+                    });
+                    (key, values)
+                })
+                .collect(),
+        };
+        tokio_stream::iter(reduce_entries)
+        .chunks(self.chunk_size)
+        .for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
+            let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let worker_tx = worker_tx.clone();
+            let reduce_tx = reduce_tx.clone();
+
+            async move {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let _ = worker_tx.send_async(JobRequest::Reduce(batch, resp_tx)).await;
+
+                match resp_rx.await {
+                    Ok(JobResult::ReduceSuccess(value)) => {
+                        debug!("Reduce task {} completed with {} results", idx, value.len());
+                        for kv in value {
+                            if let Err(e) = reduce_tx.send(kv).await {
+                                error!("Failed to send reduce result: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    Ok(JobResult::Error(e)) => {
+                        error!("Error during reduce task {}: {}", idx, e);
+                    }
+                    Err(e) => {
+                        error!("JS worker error in reduce task {}: {}", idx, e);
+                    }
+                    _ => unreachable!(),
+                };
+            }
+        })
+        .await;
+
+        // write results
+        info!("Reduce phase completed, waiting for output");
+        drop(reduce_tx);
+        let _ = reduce_consumer.await;
+        info!("Pulsar processing completed successfully");
+
+        if let Some(profiler) = self.profiler {
+            profiler.write_report()?;
+        }
+
+        Ok(())
+    }
+
+}
+
+impl<R: AsyncBufReadExt + Unpin> Debug for Pulsar<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pulsar").finish()
+    }
+}
