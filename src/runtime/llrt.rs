@@ -132,15 +132,37 @@ const WRAPPER: &str = r#"
 globalThis.__pulsar = (() => {
     const hasCombine = typeof combine === 'function';
 
+    const isThenable = (value) => typeof value?.then === 'function';
+
+    const mapError = (line, error) =>
+        new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
+
+    const reduceError = (key, error) =>
+        new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
+
+    // Calls map on every line in turn. Results that are promises run
+    // concurrently and are awaited together; plain results need no await.
     const mapBatch = async (lines) => {
-        const results = await Promise.all(lines.map(async (line) => {
+        const results = new Array(lines.length);
+        let pending = false;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            let result;
             try {
-                return await map(line);
+                result = map(line);
             } catch (error) {
-                throw new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
+                throw mapError(line, error);
             }
-        }));
-        const pairs = results.flat(1);
+            if (isThenable(result)) {
+                pending = true;
+                results[i] = Promise.resolve(result).catch((error) => {
+                    throw mapError(line, error);
+                });
+            } else {
+                results[i] = result;
+            }
+        }
+        const pairs = (pending ? await Promise.all(results) : results).flat(1);
         if (!hasCombine) {
             return pairs;
         }
@@ -152,16 +174,29 @@ globalThis.__pulsar = (() => {
     };
 
     const reduceBatch = async (batch) => {
-        return await Promise.all(
-            batch.map(async ([key, values]) => {
-                try {
-                    const reduced = await reduce(key, values);
-                    return [key, reduced];
-                } catch (error) {
-                    throw new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
-                }
-            })
-        );
+        const results = new Array(batch.length);
+        let pending = false;
+        for (let i = 0; i < batch.length; i++) {
+            const [key, values] = batch[i];
+            let reduced;
+            try {
+                reduced = reduce(key, values);
+            } catch (error) {
+                throw reduceError(key, error);
+            }
+            if (isThenable(reduced)) {
+                pending = true;
+                results[i] = Promise.resolve(reduced).then(
+                    (value) => [key, value],
+                    (error) => {
+                        throw reduceError(key, error);
+                    }
+                );
+            } else {
+                results[i] = [key, reduced];
+            }
+        }
+        return pending ? await Promise.all(results) : results;
     };
 
     const sortResults = async (results) => await sort(results);

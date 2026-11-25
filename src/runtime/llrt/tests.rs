@@ -298,3 +298,81 @@ const reduce = () => 1;
         ]
     );
 }
+
+#[tokio::test]
+async fn an_async_map_that_fails_after_awaiting_names_the_line() {
+    let script = "\
+const map = async line => { await null; throw new Error('late failure'); };
+const reduce = () => 1;
+";
+    let runtime = load(script).await.unwrap();
+    let error = runtime.map_batch(vec!["the line".to_string()]).await.unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("map failed on input line \"the line\""), "{}", message);
+    assert!(message.contains("late failure"), "{}", message);
+}
+
+#[tokio::test]
+async fn plain_and_async_results_can_be_mixed_within_a_batch() {
+    let script = "\
+const map = line => line.startsWith('a')
+  ? [[line, 1]]
+  : Promise.resolve([[line, 2]]);
+const reduce = (key, values) => key.startsWith('a') ? values[0] : Promise.resolve(values[0] * 10);
+";
+    let runtime = load(script).await.unwrap();
+    let lines: Vec<String> = ["a1", "b1", "a2", "b2"].iter().map(|line| line.to_string()).collect();
+    let pairs = runtime.map_batch(lines).await.unwrap();
+    let mut seen: Vec<(String, Value)> = pairs.into_iter().map(|pair| (pair.key, pair.value)).collect();
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        seen,
+        vec![
+            ("a1".to_string(), Value::Int(1)),
+            ("a2".to_string(), Value::Int(1)),
+            ("b1".to_string(), Value::Int(2)),
+            ("b2".to_string(), Value::Int(2)),
+        ]
+    );
+
+    let reduced = runtime
+        .reduce_batch(vec![
+            ("a".to_string(), vec![Value::Int(5)]),
+            ("b".to_string(), vec![Value::Int(5)]),
+        ])
+        .await
+        .unwrap();
+    let totals: HashMap<String, Value> = reduced.into_iter().map(|pair| (pair.key, pair.value)).collect();
+    assert_eq!(totals["a"], Value::Int(5));
+    assert_eq!(totals["b"], Value::Int(50));
+}
+
+#[tokio::test]
+async fn an_async_reduce_that_rejects_names_the_key() {
+    let script = "\
+const map = line => [[line, 1]];
+const reduce = async (key, values) => { await null; throw new Error('late reduce'); };
+";
+    let runtime = load(script).await.unwrap();
+    let error = runtime
+        .reduce_batch(vec![("somekey".to_string(), vec![Value::Int(1)])])
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("reduce failed for key \"somekey\""), "{}", message);
+    assert!(message.contains("late reduce"), "{}", message);
+}
+
+#[tokio::test]
+async fn results_of_async_maps_keep_every_pair() {
+    let script = "\
+const map = async line => line.split(' ').map(word => [word, 1]);
+const reduce = () => 1;
+";
+    let runtime = load(script).await.unwrap();
+    let pairs = runtime
+        .map_batch(vec!["a b c".to_string(), "d".to_string(), "e f".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(pairs.len(), 6);
+}
