@@ -148,7 +148,11 @@ globalThis.__pulsar = (() => {
         );
     };
 
-    return { mapBatch, reduceBatch };
+    const sortResults = async (results) => await sort(results);
+
+    const runTest = async () => await test();
+
+    return { mapBatch, reduceBatch, sortResults, runTest };
 })();
 "#;
 
@@ -239,9 +243,7 @@ impl ScriptRuntime for LlrtRuntime {
 
     async fn sort(&self, results: Vec<KeyValue>) -> Result<Vec<KeyValue>> {
         async_with!(self.vm.ctx => |ctx| {
-            let sort_fn = ctx.globals()
-                .get::<_, Function>("sort")
-                .or_else(|_| ctx.eval("sort"))
+            let sort_fn = engine_function(&ctx, "sortResults")
                 .map_err(|e| Error::Sort(format!("sort function not found: {}", e)))?;
             let promise: Promise = sort_fn
                 .call((results,))
@@ -259,9 +261,7 @@ impl ScriptRuntime for LlrtRuntime {
 
     async fn test(&self) -> Result<()> {
         async_with!(self.vm.ctx => |ctx| {
-            let test_fn = ctx.globals()
-                .get::<_, Function>("test")
-                .or_else(|_| ctx.eval("test"))
+            let test_fn = engine_function(&ctx, "runTest")
                 .map_err(|e| Error::Test(format!("test function not found: {}", e)))?;
             let promise: Promise = test_fn
                 .call(())
@@ -281,3 +281,6 @@ impl ScriptRuntime for LlrtRuntime {
         let _ = self.vm.idle().await;
     }
 }
+
+#[cfg(test)]
+mod tests;
