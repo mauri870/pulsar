@@ -49,3 +49,57 @@ impl From<Cli> for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn config(arguments: &[&str]) -> Config {
+        let cli = Cli::try_parse_from(std::iter::once("pulsar").chain(arguments.iter().copied()))
+            .unwrap();
+        Config::from(cli)
+    }
+
+    #[test]
+    fn defaults() {
+        let config = config(&[]);
+        assert!(matches!(config.input, InputSource::Stdin));
+        assert!(matches!(config.script, ScriptSource::Default));
+        assert!(matches!(config.output_format, OutputFormat::Plain));
+        assert!(!config.sort && !config.test && !config.pprof);
+        assert!(config.workers >= 1);
+        assert_eq!(config.chunk_size, 64);
+    }
+
+    #[test]
+    fn explicit_settings() {
+        let config = config(&[
+            "-f", "in.txt", "-s", "script.js", "--sort", "--test", "-j", "3", "-c", "5",
+            "--output=json", "--pprof",
+        ]);
+        assert!(matches!(&config.input, InputSource::File(path) if path == "in.txt"));
+        assert!(matches!(&config.script, ScriptSource::File(path) if path == "script.js"));
+        assert!(matches!(config.output_format, OutputFormat::Json));
+        assert!(config.sort && config.test && config.pprof);
+        assert_eq!(config.workers, 3);
+        assert_eq!(config.chunk_size, 5);
+    }
+
+    #[test]
+    fn a_dash_means_stdin() {
+        assert!(matches!(config(&["-f", "-"]).input, InputSource::Stdin));
+    }
+
+    #[test]
+    fn worker_count_and_chunk_size_are_at_least_one() {
+        let config = config(&["-j", "0", "-c", "0"]);
+        assert_eq!(config.workers, 1);
+        assert_eq!(config.chunk_size, 1);
+    }
+
+    #[test]
+    fn an_unknown_output_format_is_rejected() {
+        assert!(Cli::try_parse_from(["pulsar", "--output=xml"]).is_err());
+    }
+}

@@ -116,3 +116,82 @@ impl Sink for StdoutSink {
         self.writer.flush().await.map_err(Error::WriteOutput)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn object(entries: Vec<(&str, Value)>) -> Value {
+        Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    fn plain(value: Value) -> String {
+        OutputFormat::Plain.render("k", &value)
+    }
+
+    fn json(key: &str, value: Value) -> String {
+        OutputFormat::Json.render(key, &value)
+    }
+
+    #[test]
+    fn plain_renders_scalars() {
+        assert_eq!(plain(Value::String("text".into())), "k: text\n");
+        assert_eq!(plain(Value::Int(7)), "k: 7\n");
+        assert_eq!(plain(Value::Float(1.5)), "k: 1.5\n");
+        assert_eq!(plain(Value::Bool(true)), "k: true\n");
+        assert_eq!(plain(Value::Null), "k: null\n");
+    }
+
+    #[test]
+    fn plain_joins_arrays_with_commas_and_flattens_nested_ones() {
+        let array = Value::Array(vec![Value::Int(1), Value::String("two".into())]);
+        assert_eq!(plain(array), "k: 1,two\n");
+        let nested = Value::Array(vec![Value::Array(vec![Value::Int(1), Value::Int(2)]), Value::Int(3)]);
+        assert_eq!(plain(nested), "k: 1,2,3\n");
+    }
+
+    #[test]
+    fn plain_renders_objects_as_key_value_pairs() {
+        assert_eq!(plain(object(vec![("a", Value::Int(1))])), "k: a: 1\n");
+        let nested = object(vec![("a", object(vec![("b", Value::Int(2))]))]);
+        assert_eq!(plain(nested), "k: a: b: 2\n");
+    }
+
+    #[test]
+    fn json_renders_one_object_per_line() {
+        assert_eq!(json("k", Value::Int(7)), "{\"k\":7}\n");
+        assert_eq!(json("k", Value::String("v".into())), "{\"k\":\"v\"}\n");
+        assert_eq!(json("k", Value::Null), "{\"k\":null}\n");
+        assert_eq!(json("k", Value::Bool(false)), "{\"k\":false}\n");
+        assert_eq!(json("k", Value::Float(1.5)), "{\"k\":1.5}\n");
+    }
+
+    #[test]
+    fn json_renders_nested_values() {
+        let value = object(vec![(
+            "a",
+            Value::Array(vec![Value::Int(1), object(vec![("b", Value::Null)])]),
+        )]);
+        assert_eq!(json("k", value), "{\"k\":{\"a\":[1,{\"b\":null}]}}\n");
+    }
+
+    #[test]
+    fn json_escapes_keys_and_strings() {
+        assert_eq!(
+            json("a\"b", Value::String("line\nbreak".into())),
+            "{\"a\\\"b\":\"line\\nbreak\"}\n"
+        );
+    }
+
+    #[test]
+    fn json_renders_a_non_finite_float_as_null() {
+        assert_eq!(json("k", Value::Float(f64::NAN)), "{\"k\":null}\n");
+        assert_eq!(json("k", Value::Float(f64::INFINITY)), "{\"k\":null}\n");
+    }
+}

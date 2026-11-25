@@ -53,3 +53,36 @@ impl Error {
         matches!(self, Error::WriteOutput(e) if e.kind() == io::ErrorKind::BrokenPipe)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broken_pipe_on_output_is_recognised() {
+        let error = Error::WriteOutput(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(error.is_broken_pipe());
+    }
+
+    #[test]
+    fn other_errors_are_not_a_broken_pipe() {
+        assert!(!Error::WriteOutput(io::Error::from(io::ErrorKind::PermissionDenied)).is_broken_pipe());
+        assert!(!Error::ReadInput(io::Error::from(io::ErrorKind::BrokenPipe)).is_broken_pipe());
+        assert!(!Error::Map("boom".into()).is_broken_pipe());
+    }
+
+    #[test]
+    fn messages_name_the_failure() {
+        let open = Error::OpenInput {
+            path: "in.txt".into(),
+            source: io::Error::from(io::ErrorKind::NotFound),
+        };
+        assert!(open.to_string().starts_with("Failed to open file in.txt: "));
+        assert_eq!(
+            Error::ScriptContract("the script must define a `map` function".into()).to_string(),
+            "Invalid script: the script must define a `map` function"
+        );
+        assert_eq!(Error::ScriptLoad("bad".into()).to_string(), "Error loading JS code: bad");
+        assert_eq!(Error::Map("map failed".into()).to_string(), "map failed");
+    }
+}
