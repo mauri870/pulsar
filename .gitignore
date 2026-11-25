@@ -2,3 +2,18 @@
 input.txt
 benchmark_results.json
 benchmark_results.md
+
+# datasets and profiling output
+gdump.txt
+gmodel.json
+D1.7GB/
+bible.txt
+pg62383.txt
+Harry_Potter_all_books_preprocessed.txt
+perf.data
+perf.data.old
+profile.perf
+*.pb
+
+# spill directories left by an interrupted run
+pulsar-groups-*/
