@@ -14,6 +14,9 @@ use crate::value::{KeyValue, Value};
 /// Memory the groups may use before [`SpillStore`] moves them to disk.
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 
+/// A key and every value that was mapped to it.
+pub type Group = (String, Vec<Value>);
+
 /// Collects pairs by key.
 pub trait GroupStore: Send + 'static {
     /// Adds pairs to their groups.
@@ -25,8 +28,29 @@ pub trait GroupStore: Send + 'static {
     /// Number of distinct keys. Meaningful after `finish`.
     fn key_count(&self) -> usize;
 
-    /// Every group, consuming the store. Meaningful after `finish`.
-    fn into_groups(self) -> Result<Vec<(String, Vec<Value>)>>;
+    /// Every group, consuming the store, in batches of at most `batch_size`
+    /// groups that are produced one at a time, so the groups need not all be
+    /// in memory together. Meaningful after `finish`.
+    fn into_batches(self, batch_size: usize) -> impl Iterator<Item = Result<Vec<Group>>> + Send;
+}
+
+/// Cuts a sequence of groups into batches. A failure ends the batch it
+/// occurs in and is returned in its place.
+fn batches(
+    mut groups: impl Iterator<Item = Result<Group>> + Send,
+    batch_size: usize,
+) -> impl Iterator<Item = Result<Vec<Group>>> + Send {
+    std::iter::from_fn(move || {
+        let mut batch = Vec::with_capacity(batch_size);
+        while batch.len() < batch_size {
+            match groups.next() {
+                Some(Ok(group)) => batch.push(group),
+                Some(Err(error)) => return Some(Err(error)),
+                None => break,
+            }
+        }
+        if batch.is_empty() { None } else { Some(Ok(batch)) }
+    })
 }
 
 /// Keeps every group in memory. Used by the tests; in the engine a
@@ -54,8 +78,8 @@ impl GroupStore for MemoryStore {
         self.groups.len()
     }
 
-    fn into_groups(self) -> Result<Vec<(String, Vec<Value>)>> {
-        Ok(self.groups.into_iter().collect())
+    fn into_batches(self, batch_size: usize) -> impl Iterator<Item = Result<Vec<Group>>> + Send {
+        batches(self.groups.into_iter().map(Ok), batch_size)
     }
 }
 
@@ -150,19 +174,23 @@ impl GroupStore for SpillStore {
         }
     }
 
-    fn into_groups(self) -> Result<Vec<(String, Vec<Value>)>> {
-        match self.database {
-            None => Ok(self.memory.into_iter().collect()),
-            Some(database) => database
-                .iter()
-                .map(|entry| -> Result<(String, Vec<Value>)> {
+    fn into_batches(self, batch_size: usize) -> impl Iterator<Item = Result<Vec<Group>>> + Send {
+        let groups: Box<dyn Iterator<Item = Result<Group>> + Send> = match self.database {
+            None => Box::new(self.memory.into_iter().map(Ok)),
+            Some(database) => {
+                let entries = database.iter();
+                Box::new(entries.map(move |entry| -> Result<Group> {
+                    // The temporary database is removed when it is dropped,
+                    // so it must live as long as the iterator.
+                    let _database = &database;
                     let (key, value_bytes) = entry?;
                     let key = String::from_utf8_lossy(&key).to_string();
                     let values: Vec<Value> = deserialize(&value_bytes)?;
                     Ok((key, values))
-                })
-                .collect(),
-        }
+                }))
+            }
+        };
+        batches(groups, batch_size)
     }
 }
 

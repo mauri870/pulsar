@@ -178,19 +178,17 @@ async fn group_stage<S: GroupStore>(
 }
 
 /// Reduces every group in batches, several batches at a time, and forwards
-/// the reduced pairs. Returns at the first failure.
+/// the reduced pairs. The store hands out its groups lazily, so only the
+/// batches being reduced are in memory besides the store itself. Returns at
+/// the first failure.
 async fn reduce_stage(
     store: impl GroupStore,
     pool: &Arc<WorkerPool>,
     settings: &Settings,
     results: mpsc::Sender<KeyValue>,
 ) -> Result<()> {
-    let entries = store.into_groups()?;
-
     let task_index = AtomicUsize::new(0);
-    tokio_stream::iter(entries)
-        .chunks(settings.chunk_size)
-        .map(Ok::<_, Error>)
+    futures::stream::iter(store.into_batches(settings.chunk_size))
         .try_for_each_concurrent(settings.workers, |batch: Vec<(String, Vec<Value>)>| {
             let index = task_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let pool = Arc::clone(pool);
