@@ -1,6 +1,6 @@
 use llrt_core::vm::Vm;
 use rquickjs::{CatchResultExt, Coerced};
-use rquickjs::{Ctx, Function, Object, async_with, prelude::Promise};
+use rquickjs::{Ctx, Function, Object, prelude::Promise};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
@@ -218,7 +218,7 @@ impl ScriptRuntime for LlrtRuntime {
     }
 
     async fn map_batch(&self, lines: Vec<String>) -> Result<Vec<KeyValue>> {
-        async_with!(self.vm.ctx => |ctx| {
+        self.vm.ctx.async_with(async |ctx| {
             let map_fn = engine_function(&ctx, "mapBatch")
                 .map_err(|e| Error::Map(format!("map function not found: {}", e)))?;
             let promise: Promise = map_fn
@@ -236,7 +236,7 @@ impl ScriptRuntime for LlrtRuntime {
     }
 
     async fn reduce_batch(&self, groups: Vec<(String, Vec<Value>)>) -> Result<Vec<KeyValue>> {
-        async_with!(self.vm.ctx => |ctx| {
+        self.vm.ctx.async_with(async |ctx| {
             let reduce_fn = engine_function(&ctx, "reduceBatch")
                 .map_err(|e| Error::Reduce(format!("reduce function not found: {}", e)))?;
             let batch: Vec<KeyValue> = groups
@@ -258,7 +258,7 @@ impl ScriptRuntime for LlrtRuntime {
     }
 
     async fn sort(&self, results: Vec<KeyValue>) -> Result<Vec<KeyValue>> {
-        async_with!(self.vm.ctx => |ctx| {
+        self.vm.ctx.async_with(async |ctx| {
             let sort_fn = engine_function(&ctx, "sortResults")
                 .map_err(|e| Error::Sort(format!("sort function not found: {}", e)))?;
             let promise: Promise = sort_fn
@@ -276,7 +276,7 @@ impl ScriptRuntime for LlrtRuntime {
     }
 
     async fn test(&self) -> Result<()> {
-        async_with!(self.vm.ctx => |ctx| {
+        self.vm.ctx.async_with(async |ctx| {
             let test_fn = engine_function(&ctx, "runTest")
                 .map_err(|e| Error::Test(format!("test function not found: {}", e)))?;
             let promise: Promise = test_fn
