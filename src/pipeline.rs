@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::input::{self, ReaderSource, Source};
 use crate::output::{OutputFormat, Sink, StdoutSink};
-use crate::runtime::{LlrtRuntime, ScriptRuntime, WorkerPool};
+use crate::runtime::{Engine, LlrtRuntime, ScriptRuntime, WorkerPool};
 use crate::profile;
 use crate::script::{self, Contract};
 use crate::store::{DEFAULT_MEMORY_LIMIT_BYTES, GroupStore, SpillStore};
@@ -287,6 +287,7 @@ pub struct Pulsar {
     settings: Settings,
     output_format: OutputFormat,
     test: bool,
+    engine: Engine,
     tmpdir: PathBuf,
     profiler: Option<profile::Profiler>,
 }
@@ -308,6 +309,7 @@ impl Pulsar {
             },
             output_format: config.output_format,
             test: config.test,
+            engine: config.engine,
             tmpdir: config.tmpdir,
             profiler: if config.pprof {
                 Some(profile::Profiler::start())
@@ -334,14 +336,26 @@ impl Pulsar {
                 )
             })
             .collect();
-        run_pipeline::<LlrtRuntime>(
-            &self.script,
-            &self.settings,
-            self.source,
-            StdoutSink::new(self.output_format),
-            stores,
-        )
-        .await?;
+        let sink = StdoutSink::new(self.output_format);
+        match self.engine {
+            Engine::Llrt => {
+                run_pipeline::<LlrtRuntime>(&self.script, &self.settings, self.source, sink, stores)
+                    .await?
+            }
+            #[cfg(feature = "v8")]
+            Engine::V8 => {
+                run_pipeline::<crate::runtime::V8Runtime>(
+                    &self.script,
+                    &self.settings,
+                    self.source,
+                    sink,
+                    stores,
+                )
+                .await?
+            }
+            #[cfg(not(feature = "v8"))]
+            Engine::V8 => return Err(v8_unavailable()),
+        }
 
         if let Some(profiler) = self.profiler {
             profiler.write_report()?;
@@ -351,16 +365,35 @@ impl Pulsar {
 
     #[instrument(level = "trace")]
     async fn run_tests(&self) -> Result<()> {
-        let contract = Contract {
-            sort: false,
-            test: true,
-        };
-        let pool = WorkerPool::start::<LlrtRuntime>(&self.script, contract, 1).await?;
-        pool.test().await?;
-        pool.shutdown()?;
+        match self.engine {
+            Engine::Llrt => run_script_tests::<LlrtRuntime>(&self.script).await?,
+            #[cfg(feature = "v8")]
+            Engine::V8 => run_script_tests::<crate::runtime::V8Runtime>(&self.script).await?,
+            #[cfg(not(feature = "v8"))]
+            Engine::V8 => return Err(v8_unavailable()),
+        }
         println!("OK");
         Ok(())
     }
+}
+
+/// Runs the script's `test` function in a runtime of type `R`.
+async fn run_script_tests<R: ScriptRuntime + 'static>(script: &str) -> Result<()> {
+    let contract = Contract {
+        sort: false,
+        test: true,
+    };
+    let pool = WorkerPool::start::<R>(script, contract, 1).await?;
+    pool.test().await?;
+    pool.shutdown()
+}
+
+#[cfg(not(feature = "v8"))]
+fn v8_unavailable() -> Error {
+    Error::Unsupported(
+        "the v8 engine is not included in this build; rebuild with `cargo build --release --features v8`"
+            .into(),
+    )
 }
 
 impl Debug for Pulsar {

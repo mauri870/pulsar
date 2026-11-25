@@ -12,7 +12,65 @@ pub enum Value {
     Object(HashMap<String, Value>),
 }
 
+/// The largest whole number a float represents exactly, along with every
+/// whole number below it.
+pub const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
 impl Value {
+    /// The value as JSON. A float that JSON cannot represent (NaN, infinity)
+    /// becomes null.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::String(s) => serde_json::Value::String(s.clone()),
+            Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
+            Value::Float(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Value::Bool(b) => serde_json::Value::Bool(*b),
+            Value::Null => serde_json::Value::Null,
+            Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(Value::to_json).collect())
+            }
+            Value::Object(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.to_json()))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The value read back from JSON. A whole number that is not an exact
+    /// integer in the JSON text but fits in 2^53 becomes an integer, as for
+    /// numbers coming from JavaScript.
+    pub fn from_json(value: serde_json::Value) -> Value {
+        match value {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::String(s) => Value::String(s),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => {
+                    let f = n.as_f64().unwrap_or(0.0);
+                    if f.fract() == 0.0 && f.abs() <= MAX_EXACT_INTEGER {
+                        Value::Int(f as i64)
+                    } else {
+                        Value::Float(f)
+                    }
+                }
+            },
+            serde_json::Value::Array(items) => {
+                Value::Array(items.into_iter().map(Value::from_json).collect())
+            }
+            serde_json::Value::Object(entries) => Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, Value::from_json(value)))
+                    .collect(),
+            ),
+        }
+    }
+
     /// Approximate memory the value occupies, including its heap allocations.
     pub fn estimated_size(&self) -> usize {
         std::mem::size_of::<Value>()

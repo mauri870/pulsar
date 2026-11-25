@@ -2,6 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use crate::output::OutputFormat;
+use crate::runtime::Engine;
 
 const DEFAULT_CHUNK_SIZE: usize = 64;
 
@@ -37,6 +38,12 @@ pub struct Cli {
     /// Number of lines per chunk sent to each worker.
     #[arg(short = 'c', long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub(crate) chunk_size: usize,
+
+    /// JavaScript engine. llrt supports Node-style APIs (require, timers, fetch); v8 is much
+    /// faster on script-heavy work but runs plain ECMAScript only, and needs a build with
+    /// `--features v8`.
+    #[arg(long = "engine", default_value_t = Engine::Llrt)]
+    pub(crate) engine: Engine,
 
     /// Directory for temporary files when grouped data is too large for memory and spills to disk.
     /// Defaults to the working directory.

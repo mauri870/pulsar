@@ -63,6 +63,21 @@ Requires Rust, nvm, NodeJS.
 cargo install --path=.
 ```
 
+## JavaScript engines
+
+Scripts run on [LLRT](https://github.com/awslabs/llrt) (QuickJS) by default, which provides Node-style APIs such as `require`, timers, `performance` and `fetch`.
+
+For script-heavy work pulsar can instead run on [V8](https://v8.dev), selected with `--engine v8`. V8 is included only when pulsar is built with the `v8` feature (the binary grows from about 31 MB to about 95 MB, and the V8 library is downloaded at build time):
+
+```bash
+cargo install --path=. --features v8
+pulsar --engine v8 -f input_file -s script_file
+```
+
+V8 runs plain ECMAScript only: `require`, `setTimeout`/`setImmediate`, `performance` and `fetch` are not available, `console.log` prints nothing, and an `async` function that waits for a timer or I/O is reported as an error. Everything else behaves the same: the script contract, error messages, `--sort`, `--test` and the output formats.
+
+On 98 MB of text with the default word count script and 16 workers, V8 finished in 0.54 s where LLRT took 1.79 s (4.5 times faster on one worker), and it uses more memory (about 1.06 GB against 0.69 GB peak). Scripts that do little per line, such as splitting on spaces, run at the same speed on both because the rest of the pipeline is the limit.
+
 ## Usage
 
 By default, if no script is provided, it performs a simple word count. See [`default_script.js`](./default_script.js) for an example implementation.

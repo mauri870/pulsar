@@ -1,0 +1,383 @@
+//! Tests every [`ScriptRuntime`](crate::runtime::ScriptRuntime) must pass:
+//! loading, the script contract, the engine's functions and the conversion of
+//! values. A runtime's test module defines a `Runtime` alias, imports the
+//! names these tests use and invokes `conformance_tests!()`.
+
+macro_rules! conformance_tests {
+    () => {
+        async fn load(script: &str) -> Result<Runtime> {
+            Runtime::load(script, &Contract::default()).await
+        }
+
+        fn pair(key: &str, value: Value) -> KeyValue {
+            KeyValue {
+                key: key.to_string(),
+                value,
+            }
+        }
+
+        fn object(entries: Vec<(&str, Value)>) -> Value {
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect::<HashMap<_, _>>(),
+            )
+        }
+
+        const WORD_COUNT: &str = "\
+        const map = line => line.split(' ').map(word => [word, 1]);
+        const reduce = (key, values) => values.reduce((sum, value) => sum + value, 0);
+        ";
+
+        #[tokio::test]
+        async fn a_syntax_error_is_a_load_error() {
+            let result = load("const map =\nvar reduce = 1;").await;
+            assert!(matches!(result, Err(Error::ScriptLoad(_))));
+        }
+
+        #[tokio::test]
+        async fn a_missing_required_function_names_it() {
+            for (script, missing) in [
+                ("const reduce = () => 1;", "map"),
+                ("const map = () => [];", "reduce"),
+            ] {
+                match load(script).await {
+                    Err(Error::ScriptContract(message)) => assert!(message.contains(missing), "{}", message),
+                    other => panic!("expected a contract error, got {:?}", other.err()),
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn sort_and_test_are_required_only_when_the_contract_says_so() {
+            let sort_contract = Contract { sort: true, test: false };
+            let test_contract = Contract { sort: false, test: true };
+            assert!(Runtime::load(WORD_COUNT, &Contract::default()).await.is_ok());
+            assert!(matches!(
+                Runtime::load(WORD_COUNT, &sort_contract).await,
+                Err(Error::ScriptContract(message)) if message.contains("sort")
+            ));
+            assert!(matches!(
+                Runtime::load(WORD_COUNT, &test_contract).await,
+                Err(Error::ScriptContract(message)) if message.contains("test")
+            ));
+        }
+
+        #[tokio::test]
+        async fn a_name_that_is_not_a_function_does_not_satisfy_the_contract() {
+            let result = load("const map = 1; const reduce = () => 1;").await;
+            assert!(matches!(result, Err(Error::ScriptContract(_))));
+        }
+
+        #[tokio::test]
+        async fn map_batch_returns_every_pair_of_every_line() {
+            let runtime = load(WORD_COUNT).await.unwrap();
+            let pairs = runtime
+                .map_batch(vec!["a b".to_string(), "c".to_string(), "".to_string()])
+                .await
+                .unwrap();
+            let mut keys: Vec<String> = pairs.into_iter().map(|pair| pair.key).collect();
+            keys.sort();
+            // The empty line splits into one empty word.
+            assert_eq!(keys, ["", "a", "b", "c"]);
+        }
+
+        #[tokio::test]
+        async fn map_may_return_a_promise_or_a_plain_array() {
+            let script = "\
+        const map = async line => [[line, 1]];
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let pairs = runtime.map_batch(vec!["x".to_string()]).await.unwrap();
+            assert_eq!(pairs.len(), 1);
+        }
+
+        const SUMMING_COMBINE: &str = "\
+        const map = line => line.split(' ').map(word => [word, 1]);
+        const combine = pairs => {
+          const sums = {};
+          for (const [key, value] of pairs) sums[key] = (sums[key] || 0) + value;
+          return Object.entries(sums);
+        };
+        const reduce = (key, values) => values.length;
+        ";
+
+        #[tokio::test]
+        async fn combine_merges_the_pairs_of_the_whole_batch() {
+            let runtime = load(SUMMING_COMBINE).await.unwrap();
+            let pairs = runtime
+                .map_batch(vec!["a a b".to_string(), "a c".to_string()])
+                .await
+                .unwrap();
+            let totals: HashMap<String, Value> = pairs.into_iter().map(|pair| (pair.key, pair.value)).collect();
+            assert_eq!(totals.len(), 3, "the `a` pairs of both lines should be merged");
+            assert_eq!(totals["a"], Value::Int(3));
+            assert_eq!(totals["b"], Value::Int(1));
+            assert_eq!(totals["c"], Value::Int(1));
+        }
+
+        #[tokio::test]
+        async fn combine_does_not_merge_across_batches() {
+            let runtime = load(SUMMING_COMBINE).await.unwrap();
+            let first = runtime.map_batch(vec!["a".to_string()]).await.unwrap();
+            let second = runtime.map_batch(vec!["a".to_string()]).await.unwrap();
+            assert_eq!(first.len() + second.len(), 2);
+        }
+
+        #[tokio::test]
+        async fn a_failing_combine_names_the_batch_size() {
+            let script = "\
+        const map = line => [[line, 1]];
+        const combine = pairs => { throw new Error('cannot combine'); };
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let error = runtime
+                .map_batch(vec!["a".to_string(), "b".to_string()])
+                .await
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(matches!(error, Error::Map(_)));
+            assert!(message.contains("combine failed on a batch of 2 lines"), "{}", message);
+            assert!(message.contains("cannot combine"), "{}", message);
+        }
+
+        #[tokio::test]
+        async fn a_failing_map_names_the_line_and_truncates_it() {
+            let script = "\
+        const map = line => { throw new Error('nope'); };
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let long_line = "x".repeat(500);
+            let error = runtime.map_batch(vec![long_line]).await.unwrap_err();
+            let message = error.to_string();
+            assert!(matches!(error, Error::Map(_)));
+            assert!(message.contains("map failed on input line"), "{}", message);
+            assert!(message.contains("nope"), "{}", message);
+            assert!(!message.contains(&"x".repeat(201)), "line should be truncated");
+        }
+
+        #[tokio::test]
+        async fn a_map_result_that_is_not_a_pair_array_is_an_error() {
+            let script = "\
+        const map = line => 'not an array';
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let result = runtime.map_batch(vec!["x".to_string()]).await;
+            assert!(matches!(result, Err(Error::Map(_))));
+        }
+
+        #[tokio::test]
+        async fn reduce_batch_reduces_each_group() {
+            let runtime = load(WORD_COUNT).await.unwrap();
+            let reduced = runtime
+                .reduce_batch(vec![
+                    ("a".to_string(), vec![Value::Int(1), Value::Int(2)]),
+                    ("b".to_string(), vec![Value::Int(5)]),
+                ])
+                .await
+                .unwrap();
+            let totals: HashMap<String, Value> = reduced.into_iter().map(|pair| (pair.key, pair.value)).collect();
+            assert_eq!(totals["a"], Value::Int(3));
+            assert_eq!(totals["b"], Value::Int(5));
+        }
+
+        #[tokio::test]
+        async fn a_failing_reduce_names_the_key() {
+            let script = "\
+        const map = line => [[line, 1]];
+        const reduce = (key, values) => { throw new Error('bad total'); };
+        ";
+            let runtime = load(script).await.unwrap();
+            let error = runtime
+                .reduce_batch(vec![("somekey".to_string(), vec![Value::Int(1)])])
+                .await
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(matches!(error, Error::Reduce(_)));
+            assert!(message.contains("reduce failed for key \"somekey\""), "{}", message);
+            assert!(message.contains("bad total"), "{}", message);
+        }
+
+        #[tokio::test]
+        async fn sort_orders_the_results() {
+            let script = "\
+        const map = line => [[line, 1]];
+        const reduce = () => 1;
+        const sort = results => results.sort((a, b) => a[0].localeCompare(b[0]));
+        ";
+            let runtime = Runtime::load(script, &Contract { sort: true, test: false })
+                .await
+                .unwrap();
+            let sorted = runtime
+                .sort(vec![pair("b", Value::Int(1)), pair("a", Value::Int(2))])
+                .await
+                .unwrap();
+            let keys: Vec<&str> = sorted.iter().map(|pair| pair.key.as_str()).collect();
+            assert_eq!(keys, ["a", "b"]);
+        }
+
+        #[tokio::test]
+        async fn test_runs_the_test_function_and_reports_its_failure() {
+            let passing = "\
+        const map = () => []; const reduce = () => 1;
+        const test = () => {};
+        ";
+            let failing = "\
+        const map = () => []; const reduce = () => 1;
+        const test = async () => { throw new Error('assertion failed'); };
+        ";
+            let contract = Contract { sort: false, test: true };
+            let runtime = Runtime::load(passing, &contract).await.unwrap();
+            runtime.test().await.unwrap();
+
+            let runtime = Runtime::load(failing, &contract).await.unwrap();
+            let error = runtime.test().await.unwrap_err();
+            assert!(matches!(error, Error::Test(_)));
+            assert!(error.to_string().contains("assertion failed"));
+        }
+
+        #[tokio::test]
+        async fn values_survive_the_trip_through_javascript() {
+            let script = "\
+        const map = line => [['k', JSON.parse(line)]];
+        const reduce = (key, values) => values[0];
+        ";
+            let runtime = load(script).await.unwrap();
+            let json = r#"{"a":[1,"x",null,true,1.5],"b":{"c":2},"d":"text"}"#;
+            let pairs = runtime.map_batch(vec![json.to_string()]).await.unwrap();
+            let expected = object(vec![
+                (
+                    "a",
+                    Value::Array(vec![
+                        Value::Int(1),
+                        Value::String("x".to_string()),
+                        Value::Null,
+                        Value::Bool(true),
+                        Value::Float(1.5),
+                    ]),
+                ),
+                ("b", object(vec![("c", Value::Int(2))])),
+                ("d", Value::String("text".to_string())),
+            ]);
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(pairs[0].value, expected);
+
+            // And back: a value passed to reduce arrives in JS as the same structure.
+            let echoed = runtime
+                .reduce_batch(vec![("k".to_string(), vec![expected.clone()])])
+                .await
+                .unwrap();
+            assert_eq!(echoed[0].value, expected);
+        }
+
+        #[tokio::test]
+        async fn whole_numbers_beyond_32_bits_stay_integers() {
+            let script = "\
+        const map = line => [['k', JSON.parse(line)]];
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let values = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+            let pairs = runtime
+                .map_batch(values(&["1099511627776", "-4294967296", "9007199254740992", "1.5", "1e21"]))
+                .await
+                .unwrap();
+            let converted: Vec<Value> = pairs.into_iter().map(|pair| pair.value).collect();
+            assert_eq!(
+                converted,
+                vec![
+                    Value::Int(1_099_511_627_776),
+                    Value::Int(-4_294_967_296),
+                    Value::Int(9_007_199_254_740_992),
+                    Value::Float(1.5),
+                    Value::Float(1e21),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn an_async_map_that_fails_after_awaiting_names_the_line() {
+            let script = "\
+        const map = async line => { await null; throw new Error('late failure'); };
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let error = runtime.map_batch(vec!["the line".to_string()]).await.unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("map failed on input line \"the line\""), "{}", message);
+            assert!(message.contains("late failure"), "{}", message);
+        }
+
+        #[tokio::test]
+        async fn plain_and_async_results_can_be_mixed_within_a_batch() {
+            let script = "\
+        const map = line => line.startsWith('a')
+          ? [[line, 1]]
+          : Promise.resolve([[line, 2]]);
+        const reduce = (key, values) => key.startsWith('a') ? values[0] : Promise.resolve(values[0] * 10);
+        ";
+            let runtime = load(script).await.unwrap();
+            let lines: Vec<String> = ["a1", "b1", "a2", "b2"].iter().map(|line| line.to_string()).collect();
+            let pairs = runtime.map_batch(lines).await.unwrap();
+            let mut seen: Vec<(String, Value)> = pairs.into_iter().map(|pair| (pair.key, pair.value)).collect();
+            seen.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(
+                seen,
+                vec![
+                    ("a1".to_string(), Value::Int(1)),
+                    ("a2".to_string(), Value::Int(1)),
+                    ("b1".to_string(), Value::Int(2)),
+                    ("b2".to_string(), Value::Int(2)),
+                ]
+            );
+
+            let reduced = runtime
+                .reduce_batch(vec![
+                    ("a".to_string(), vec![Value::Int(5)]),
+                    ("b".to_string(), vec![Value::Int(5)]),
+                ])
+                .await
+                .unwrap();
+            let totals: HashMap<String, Value> = reduced.into_iter().map(|pair| (pair.key, pair.value)).collect();
+            assert_eq!(totals["a"], Value::Int(5));
+            assert_eq!(totals["b"], Value::Int(50));
+        }
+
+        #[tokio::test]
+        async fn an_async_reduce_that_rejects_names_the_key() {
+            let script = "\
+        const map = line => [[line, 1]];
+        const reduce = async (key, values) => { await null; throw new Error('late reduce'); };
+        ";
+            let runtime = load(script).await.unwrap();
+            let error = runtime
+                .reduce_batch(vec![("somekey".to_string(), vec![Value::Int(1)])])
+                .await
+                .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("reduce failed for key \"somekey\""), "{}", message);
+            assert!(message.contains("late reduce"), "{}", message);
+        }
+
+        #[tokio::test]
+        async fn results_of_async_maps_keep_every_pair() {
+            let script = "\
+        const map = async line => line.split(' ').map(word => [word, 1]);
+        const reduce = () => 1;
+        ";
+            let runtime = load(script).await.unwrap();
+            let pairs = runtime
+                .map_batch(vec!["a b c".to_string(), "d".to_string(), "e f".to_string()])
+                .await
+                .unwrap();
+            assert_eq!(pairs.len(), 6);
+        }
+    };
+}
+
+pub(crate) use conformance_tests;

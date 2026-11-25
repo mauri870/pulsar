@@ -411,6 +411,72 @@ fn closed_stdout_ends_quietly() {
     assert!(output.stderr.is_empty(), "{}", stderr_text(&output));
 }
 
+#[cfg(not(feature = "v8"))]
+#[test]
+fn the_v8_engine_needs_a_build_with_the_feature() {
+    let sandbox = Sandbox::new("v8-unavailable");
+    let output = sandbox.run(&["--engine", "v8"], "a\n");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr_text(&output).contains("--features v8"), "{}", stderr_text(&output));
+}
+
+#[test]
+fn an_unknown_engine_is_a_usage_error() {
+    let sandbox = Sandbox::new("unknown-engine");
+    let output = sandbox.run(&["--engine", "spidermonkey"], "");
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[cfg(feature = "v8")]
+#[test]
+fn the_v8_engine_counts_words_like_llrt() {
+    let sandbox = Sandbox::new("v8-words");
+    let input = "a b a\nb a\nc\n";
+    let llrt = sandbox.run(&["--engine", "llrt"], input);
+    let v8 = sandbox.run(&["--engine", "v8"], input);
+    assert_eq!(v8.status.code(), Some(0), "{}", stderr_text(&v8));
+    assert_eq!(stdout_lines(&v8), ["a: 3", "b: 2", "c: 1"]);
+    assert_eq!(stdout_lines(&v8), stdout_lines(&llrt));
+}
+
+#[cfg(feature = "v8")]
+#[test]
+fn the_v8_engine_runs_json_output_sorting_and_test_mode() {
+    let sandbox = Sandbox::new("v8-modes");
+    let script = sandbox.write(
+        "modes.js",
+        "\
+const map = line => [[line, { length: line.length }]];
+const reduce = (key, values) => values[0];
+const sort = results => results.sort((a, b) => a[0].localeCompare(b[0]));
+const test = async () => { if (map('x').length !== 1) throw new Error('bad'); };
+",
+    );
+    let path = script.to_str().unwrap();
+    let output = sandbox.run(&["--engine", "v8", "-s", path, "--sort", "--output=json"], "bb\na\n");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"a\":{\"length\":1}}\n{\"bb\":{\"length\":2}}\n"
+    );
+    let tested = sandbox.run(&["--engine", "v8", "-s", path, "--test"], "");
+    assert_eq!(tested.status.code(), Some(0), "{}", stderr_text(&tested));
+    assert_eq!(String::from_utf8_lossy(&tested.stdout), "OK\n");
+}
+
+#[cfg(feature = "v8")]
+#[test]
+fn the_v8_engine_reports_a_script_that_needs_node_apis() {
+    let sandbox = Sandbox::new("v8-no-node");
+    let script = sandbox.write(
+        "node.js",
+        "const crypto = require('crypto');\nconst map = l => [[l, 1]];\nconst reduce = (k, v) => 1;\n",
+    );
+    let output = sandbox.run(&["--engine", "v8", "-s", script.to_str().unwrap()], "x\n");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr_text(&output).contains("require is not defined"), "{}", stderr_text(&output));
+}
+
 #[test]
 fn invalid_utf8_input_fails() {
     let sandbox = Sandbox::new("invalid-utf8");

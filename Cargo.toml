@@ -23,4 +23,8 @@ sled = "0.34.7"
 bincode = "1"
 flume = "0.12"
 pprof2 = { version = "0.13.1", features = ["prost-codec"] }
+v8 = { version = "152.2.0", optional = true }
+
+[features]
+v8 = ["dep:v8"]
 

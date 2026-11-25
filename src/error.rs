@@ -45,6 +45,9 @@ pub enum Error {
 
     #[error("{0}")]
     Worker(String),
+
+    #[error("{0}")]
+    Unsupported(String),
 }
 
 impl Error {

@@ -28,7 +28,7 @@ impl OutputFormat {
     pub fn render(&self, key: &str, value: &Value) -> String {
         match self {
             OutputFormat::Plain => format!("{}: {}\n", key, plain_text(value)),
-            OutputFormat::Json => format!("{}\n", serde_json::json!({ key: json_value(value) })),
+            OutputFormat::Json => format!("{}\n", serde_json::json!({ key: value.to_json() })),
         }
     }
 }
@@ -52,24 +52,6 @@ fn plain_text(value: &Value) -> String {
             .map(|(k, v)| format!("{}: {}", k, plain_text(v)))
             .collect::<Vec<_>>()
             .join(", "),
-    }
-}
-
-fn json_value(value: &Value) -> serde_json::Value {
-    match value {
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Int(n) => serde_json::Value::Number(serde_json::Number::from(*n)),
-        Value::Float(n) => serde_json::Number::from_f64(*n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Null => serde_json::Value::Null,
-        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(json_value).collect()),
-        Value::Object(obj) => serde_json::Value::Object(
-            obj.iter()
-                .map(|(k, v)| (k.clone(), json_value(v)))
-                .collect(),
-        ),
     }
 }
 

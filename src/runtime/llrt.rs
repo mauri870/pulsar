@@ -4,13 +4,9 @@ use rquickjs::{Ctx, Function, Object, prelude::Promise};
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::runtime::ScriptRuntime;
+use crate::runtime::{ENGINE_GLOBAL, ScriptRuntime, WRAPPER};
 use crate::script::Contract;
-use crate::value::{KeyValue, Value};
-
-/// The largest whole number a float represents exactly, along with every
-/// whole number below it.
-const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+use crate::value::{KeyValue, MAX_EXACT_INTEGER, Value};
 
 impl<'js> llrt_core::IntoJs<'js> for Value {
     fn into_js(self, ctx: &llrt_core::Ctx<'js>) -> rquickjs::Result<llrt_core::Value<'js>> {
@@ -120,92 +116,6 @@ impl<'js> llrt_core::IntoJs<'js> for KeyValue {
         }
     }
 }
-
-/// Name of the global object that holds the engine's own functions, so they
-/// cannot collide with names defined by the user script.
-const ENGINE_GLOBAL: &str = "__pulsar";
-
-/// Installs the engine's functions. It runs after the user script, which can
-/// define `map`, `combine`, `reduce` and `sort`; those are looked up in the
-/// script's scope when the functions are called.
-const WRAPPER: &str = r#"
-globalThis.__pulsar = (() => {
-    const hasCombine = typeof combine === 'function';
-
-    const isThenable = (value) => typeof value?.then === 'function';
-
-    const mapError = (line, error) =>
-        new Error(`map failed on input line ${JSON.stringify(line.slice(0, 200))}: ${error}`);
-
-    const reduceError = (key, error) =>
-        new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
-
-    // Calls map on every line in turn. Results that are promises run
-    // concurrently and are awaited together; plain results need no await.
-    const mapBatch = async (lines) => {
-        const results = new Array(lines.length);
-        let pending = false;
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            let result;
-            try {
-                result = map(line);
-            } catch (error) {
-                throw mapError(line, error);
-            }
-            if (isThenable(result)) {
-                pending = true;
-                results[i] = Promise.resolve(result).catch((error) => {
-                    throw mapError(line, error);
-                });
-            } else {
-                results[i] = result;
-            }
-        }
-        const pairs = (pending ? await Promise.all(results) : results).flat(1);
-        if (!hasCombine) {
-            return pairs;
-        }
-        try {
-            return await combine(pairs);
-        } catch (error) {
-            throw new Error(`combine failed on a batch of ${lines.length} lines: ${error}`);
-        }
-    };
-
-    const reduceBatch = async (batch) => {
-        const results = new Array(batch.length);
-        let pending = false;
-        for (let i = 0; i < batch.length; i++) {
-            const [key, values] = batch[i];
-            let reduced;
-            try {
-                reduced = reduce(key, values);
-            } catch (error) {
-                throw reduceError(key, error);
-            }
-            if (isThenable(reduced)) {
-                pending = true;
-                results[i] = Promise.resolve(reduced).then(
-                    (value) => [key, value],
-                    (error) => {
-                        throw reduceError(key, error);
-                    }
-                );
-            } else {
-                results[i] = [key, reduced];
-            }
-        }
-        return pending ? await Promise.all(results) : results;
-    };
-
-    const sortResults = async (results) => await sort(results);
-
-    const runTest = async () => await test();
-
-    return { mapBatch, reduceBatch, sortResults, runTest };
-})();
-"#;
 
 /// Looks up one of the engine's functions.
 fn engine_function<'js>(ctx: &Ctx<'js>, name: &str) -> rquickjs::Result<Function<'js>> {
