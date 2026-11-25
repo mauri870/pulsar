@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use std::fmt::Display;
+use std::future::Future;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::instrument;
 
@@ -72,22 +73,46 @@ fn json_value(value: &Value) -> serde_json::Value {
     }
 }
 
-/// Format and print a single result
-#[instrument(level = "trace", skip(writer))]
-pub async fn write_result(
-    key: &str,
-    result: &Value,
-    output_format: &OutputFormat,
-    writer: &mut BufWriter<tokio::io::Stdout>,
-) -> Result<()> {
-    writer
-        .write_all(output_format.render(key, result).as_bytes())
-        .await
-        .map_err(Error::WriteOutput)?;
+/// Where the engine writes its results to.
+pub trait Sink: Send + 'static {
+    /// Writes one result.
+    fn write(&mut self, key: &str, value: &Value) -> impl Future<Output = Result<()>> + Send;
 
-    // Use tokio's async version of flush
-    tokio::io::stdout()
-        .flush()
-        .await
-        .map_err(Error::WriteOutput)
+    /// Writes out whatever is still buffered. Called once, after the last result.
+    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// Writes formatted results to stdout.
+pub struct StdoutSink {
+    writer: BufWriter<tokio::io::Stdout>,
+    format: OutputFormat,
+}
+
+impl StdoutSink {
+    pub fn new(format: OutputFormat) -> Self {
+        StdoutSink {
+            writer: BufWriter::new(tokio::io::stdout()),
+            format,
+        }
+    }
+}
+
+impl Sink for StdoutSink {
+    #[instrument(level = "trace", skip(self, value))]
+    async fn write(&mut self, key: &str, value: &Value) -> Result<()> {
+        self.writer
+            .write_all(self.format.render(key, value).as_bytes())
+            .await
+            .map_err(Error::WriteOutput)?;
+
+        // Use tokio's async version of flush
+        tokio::io::stdout()
+            .flush()
+            .await
+            .map_err(Error::WriteOutput)
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        self.writer.flush().await.map_err(Error::WriteOutput)
+    }
 }
