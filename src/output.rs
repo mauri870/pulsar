@@ -25,7 +25,7 @@ impl Display for OutputFormat {
 #[instrument(level = "trace", skip(writer))]
 pub async fn write_result(
     key: &str,
-    result: &crate::js::Value,
+    result: &crate::value::Value,
     output_format: &OutputFormat,
     writer: &mut BufWriter<tokio::io::Stdout>,
 ) -> Result<()> {

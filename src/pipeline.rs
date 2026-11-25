@@ -1,10 +1,8 @@
 use bincode::{deserialize, serialize};
 use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
-use crate::js::JobRequest;
-use std::{collections::HashMap, sync::atomic::AtomicUsize};
+use std::{collections::HashMap, sync::Arc, sync::atomic::AtomicUsize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufWriter},
-    sync::oneshot,
     task::{JoinError, JoinHandle},
 };
 use tokio_stream::wrappers::LinesStream;
@@ -14,23 +12,21 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::input::InputReader;
 use crate::output::OutputFormat;
-use crate::{input, js, output, profile, script};
+use crate::runtime::{LlrtRuntime, WorkerPool};
+use crate::value::{KeyValue, Value};
+use crate::{input, output, profile, script};
 use std::fmt::Debug;
 use tracing::instrument;
-
-fn worker_gone<T>(_: flume::SendError<T>) -> Error {
-    Error::Worker("all JS VM workers have exited".into())
-}
 
 fn task_failed(error: JoinError) -> Error {
     Error::Worker(format!("a pipeline task failed: {}", error))
 }
 
 fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut values: Vec<js::Value> = old_value
+    let mut values: Vec<Value> = old_value
         .and_then(|bytes| deserialize(bytes).ok())
         .unwrap_or_default();
-    let new_values: Vec<js::Value> = deserialize(new_bytes).unwrap_or_default();
+    let new_values: Vec<Value> = deserialize(new_bytes).unwrap_or_default();
     values.extend(new_values);
     serialize(&values).ok()
 }
@@ -38,9 +34,9 @@ fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Opti
 const MAX_GROUPING_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 
 const HASHMAP_SLOT_SIZE: usize = {
-    let size = std::mem::size_of::<(String, Vec<js::Value>)>();
+    let size = std::mem::size_of::<(String, Vec<Value>)>();
     let align = {
-        let a = std::mem::align_of::<(String, Vec<js::Value>)>();
+        let a = std::mem::align_of::<(String, Vec<Value>)>();
         let b = std::mem::align_of::<usize>();
         if a > b { a } else { b }
     };
@@ -48,7 +44,7 @@ const HASHMAP_SLOT_SIZE: usize = {
 };
 
 enum GroupStorage {
-    Memory(HashMap<String, Vec<js::Value>>),
+    Memory(HashMap<String, Vec<Value>>),
     Sled(sled::Db),
 }
 
@@ -99,7 +95,9 @@ impl Pulsar<InputReader> {
 
     #[instrument(level = "trace")]
     pub async fn run_tests(&self) -> Result<()> {
-        js::run_test_file(self.script.clone())?;
+        let pool = WorkerPool::start::<LlrtRuntime>(&self.script, 1).await?;
+        pool.test().await?;
+        pool.shutdown()?;
         println!("OK");
         Ok(())
     }
@@ -108,44 +106,15 @@ impl Pulsar<InputReader> {
     pub async fn run_engine(self) -> Result<()> {
         let n_cpus = self.workers;
         info!("Starting pulsar engine with {} CPU workers", n_cpus);
-        let (worker_tx, worker_rx) = flume::bounded(self.chunk_size);
-        let mut init_rxs = Vec::with_capacity(n_cpus);
-
-        for idx in 0..n_cpus {
-            let (init_tx, init_rx) = oneshot::channel();
-            init_rxs.push(init_rx);
-            if let Err(e) = js::start_vm_worker(self.script.clone(), worker_rx.clone(), init_tx) {
-                return Err(Error::Worker(format!(
-                    "Failed to start JS VM worker {}: {}",
-                    idx, e
-                )));
-            }
-        }
-        // Drop the original so the channel closes when all workers exit
-        drop(worker_rx);
-
-        // Wait for all workers to finish JS initialisation before proceeding.
-        // This adds a startup delay but ensures we don't get trapped in a deadlock.
-        for init_rx in init_rxs {
-            match init_rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    return Err(Error::Worker(
-                        "a JS VM worker exited during initialization".into(),
-                    ));
-                }
-            }
-        }
+        let pool = Arc::new(WorkerPool::start::<LlrtRuntime>(&self.script, n_cpus).await?);
         info!("Successfully started {} JS VM workers", n_cpus);
 
-        // aggregate map results — workers send one Vec<KeyValue> per input line
-        let (map_result_tx, map_result_rx) =
-            tokio::sync::mpsc::channel::<Vec<js::KeyValue>>(n_cpus * self.chunk_size);
+        // aggregate map results — one Vec<KeyValue> per mapped batch of lines
+        let (map_result_tx, map_result_rx) = tokio::sync::mpsc::channel::<Vec<KeyValue>>(n_cpus * 2);
         let map_consumer: JoinHandle<Result<GroupStorage>> = tokio::spawn(async move {
             let mut map_result_rx = map_result_rx;
             let mut overflow_db: Option<sled::Db> = None;
-            let mut hashmap: HashMap<String, Vec<js::Value>> = HashMap::new();
+            let mut hashmap: HashMap<String, Vec<Value>> = HashMap::new();
             let mut total_processed = 0;
 
             while let Some(kvs) = map_result_rx.recv().await {
@@ -199,69 +168,42 @@ impl Pulsar<InputReader> {
             }
         });
 
-        // map phase: dispatch RunMapPhase to each worker, then stream lines into the shared channel
+        // map phase: send batches of lines to the workers, a few batches per worker at a time
         info!("Starting map phase");
-        let (map_item_tx, map_item_rx) = flume::bounded::<String>(n_cpus * self.chunk_size);
-
-        let mut map_done = FuturesUnordered::new();
-        for _ in 0..n_cpus {
-            let (done_tx, done_rx) = oneshot::channel::<Result<()>>();
-            map_done.push(async move {
-                match done_rx.await {
-                    Ok(result) => result,
-                    Err(_) => Err(Error::Worker(
-                        "a JS VM worker exited during the map phase".into(),
-                    )),
-                }
-            });
-            worker_tx
-                .send_async(JobRequest::RunMapPhase {
-                    item_rx: map_item_rx.clone(),
-                    result_tx: map_result_tx.clone(),
-                    concurrency: self.chunk_size,
-                    done_tx,
-                })
-                .await
-                .map_err(worker_gone)?;
-        }
-        drop(map_item_rx);
-        drop(map_result_tx); // workers hold the remaining Sender clones
-
-        // Feed the lines to the workers, and stop as soon as a worker reports a failure.
         let mut lines = LinesStream::new(self.reader.lines());
-        let mut map_failure: Option<Error> = None;
-        loop {
+        let mut batch = Vec::with_capacity(self.chunk_size);
+        let mut in_flight = FuturesUnordered::new();
+        let max_in_flight = n_cpus * 2;
+        let mut input_done = false;
+        while !input_done || !in_flight.is_empty() {
             tokio::select! {
-                Some(result) = map_done.next() => {
-                    if let Err(e) = result {
-                        map_failure = Some(e);
-                        break;
-                    }
+                Some(result) = in_flight.next(), if !in_flight.is_empty() => {
+                    let pairs = result?;
+                    map_result_tx
+                        .send(pairs)
+                        .await
+                        .map_err(|_| Error::Worker("the group stage stopped".into()))?;
                 }
-                line = lines.next() => match line {
+                line = lines.next(), if !input_done && in_flight.len() < max_in_flight => match line {
                     Some(Ok(line)) => {
-                        if map_item_tx.send_async(line).await.is_err() {
-                            break;
+                        batch.push(line);
+                        if batch.len() == self.chunk_size {
+                            in_flight.push(pool.map_batch(std::mem::take(&mut batch)));
                         }
                     }
-                    Some(Err(e)) => {
-                        map_failure = Some(Error::ReadInput(e));
-                        break;
+                    Some(Err(e)) => return Err(Error::ReadInput(e)),
+                    None => {
+                        input_done = true;
+                        if !batch.is_empty() {
+                            in_flight.push(pool.map_batch(std::mem::take(&mut batch)));
+                        }
                     }
-                    None => break,
                 },
             }
         }
-        drop(map_item_tx); // closing the channel signals workers: no more items
-        if let Some(e) = map_failure {
-            return Err(e);
-        }
-
-        // Wait for all map workers to finish and drop their result_tx clones;
-        // once they do, map_result_rx closes and map_consumer terminates.
-        while let Some(result) = map_done.next().await {
-            result?;
-        }
+        // Closing the channel ends the group stage.
+        drop(map_result_tx);
+        drop(in_flight);
 
         // group phase
         info!("Map phase completed, starting group phase");
@@ -280,7 +222,7 @@ impl Pulsar<InputReader> {
         let reduce_consumer: JoinHandle<Result<()>> = tokio::spawn({
             let output_format = self.output_format.clone();
             let sort = self.sort;
-            let worker_tx = worker_tx.clone();
+            let pool = Arc::clone(&pool);
             async move {
                 info!("Starting output writer task");
                 let stdout = tokio::io::stdout();
@@ -299,14 +241,7 @@ impl Pulsar<InputReader> {
                         result_count
                     );
 
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    worker_tx
-                        .send_async(JobRequest::Sort(results, resp_tx))
-                        .await
-                        .map_err(worker_gone)?;
-                    let output = resp_rx.await.map_err(|_| {
-                        Error::Worker("a JS VM worker exited during sorting".into())
-                    })??;
+                    let output = pool.sort(results).await?;
                     info!(
                         "Sort operation completed, writing {} sorted results",
                         output.len()
@@ -333,14 +268,14 @@ impl Pulsar<InputReader> {
         // reduce phase
         info!("Starting reduce phase");
         let task_idx = AtomicUsize::new(0);
-        let reduce_entries: Vec<(String, Vec<js::Value>)> = match groups {
+        let reduce_entries: Vec<(String, Vec<Value>)> = match groups {
             GroupStorage::Memory(hashmap) => hashmap.into_iter().collect(),
             GroupStorage::Sled(db) => db
                 .iter()
-                .map(|entry| -> Result<(String, Vec<js::Value>)> {
+                .map(|entry| -> Result<(String, Vec<Value>)> {
                     let (key, value_bytes) = entry?;
                     let key = String::from_utf8_lossy(&key).to_string();
-                    let values: Vec<js::Value> = deserialize(&value_bytes)?;
+                    let values: Vec<Value> = deserialize(&value_bytes)?;
                     Ok((key, values))
                 })
                 .collect::<Result<_>>()?,
@@ -348,23 +283,13 @@ impl Pulsar<InputReader> {
         let reduce_result = tokio_stream::iter(reduce_entries)
             .chunks(self.chunk_size)
             .map(Ok::<_, Error>)
-            .try_for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<js::Value>)>| {
+            .try_for_each_concurrent(n_cpus, |batch: Vec<(String, Vec<Value>)>| {
                 let idx = task_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let worker_tx = worker_tx.clone();
+                let pool = Arc::clone(&pool);
                 let reduce_tx = reduce_tx.clone();
 
                 async move {
-                    let (resp_tx, resp_rx) = oneshot::channel();
-                    worker_tx
-                        .send_async(JobRequest::Reduce(batch, resp_tx))
-                        .await
-                        .map_err(worker_gone)?;
-                    let value = resp_rx.await.map_err(|_| {
-                        Error::Worker(format!(
-                            "a JS VM worker exited during reduce task {}",
-                            idx
-                        ))
-                    })??;
+                    let value = pool.reduce_batch(batch).await?;
                     debug!("Reduce task {} completed with {} results", idx, value.len());
                     for kv in value {
                         reduce_tx
@@ -390,6 +315,9 @@ impl Pulsar<InputReader> {
             return Err(reduce_error);
         }
         reduce_consumer.await.map_err(task_failed)??;
+        if let Some(pool) = Arc::into_inner(pool) {
+            pool.shutdown()?;
+        }
         info!("Pulsar processing completed successfully");
 
         if let Some(profiler) = self.profiler {
