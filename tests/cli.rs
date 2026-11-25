@@ -201,6 +201,24 @@ const reduce = async (key, values) => values[0];
 }
 
 #[test]
+fn whole_numbers_beyond_32_bits_print_as_integers() {
+    let sandbox = Sandbox::new("big-integers");
+    let script = sandbox.write(
+        "numbers.js",
+        "\
+const map = line => [['power', 2 ** 40], ['ratio', 0.5]];
+const reduce = (key, values) => values[0];
+",
+    );
+    let output = sandbox.run(&["-s", script.to_str().unwrap(), "--output=json"], "x\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout_lines(&output),
+        [r#"{"power":1099511627776}"#, r#"{"ratio":0.5}"#]
+    );
+}
+
+#[test]
 fn combine_runs_before_reduce() {
     let sandbox = Sandbox::new("combine");
     let script = sandbox.write(

@@ -8,6 +8,10 @@ use crate::runtime::ScriptRuntime;
 use crate::script::Contract;
 use crate::value::{KeyValue, Value};
 
+/// The largest whole number a float represents exactly, along with every
+/// whole number below it.
+const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
 impl<'js> llrt_core::IntoJs<'js> for Value {
     fn into_js(self, ctx: &llrt_core::Ctx<'js>) -> rquickjs::Result<llrt_core::Value<'js>> {
         match self {
@@ -43,7 +47,15 @@ impl<'js> llrt_core::FromJs<'js> for Value {
         } else if value.is_int() {
             Ok(Value::Int(value.as_int().unwrap_or(0) as i64))
         } else if value.is_float() {
-            Ok(Value::Float(value.as_float().unwrap_or(0.0)))
+            let number = value.as_float().unwrap_or(0.0);
+            // JS has a single number type, and whole numbers beyond 32 bits
+            // arrive as floats. Keep them integers up to 2^53, where every
+            // whole number is still exact.
+            if number.fract() == 0.0 && number.abs() <= MAX_EXACT_INTEGER {
+                Ok(Value::Int(number as i64))
+            } else {
+                Ok(Value::Float(number))
+            }
         } else if value.is_bool() {
             Ok(Value::Bool(value.as_bool().unwrap_or(false)))
         } else if value.is_null() {

@@ -239,3 +239,28 @@ const reduce = (key, values) => values[0];
         .unwrap();
     assert_eq!(echoed[0].value, expected);
 }
+
+#[tokio::test]
+async fn whole_numbers_beyond_32_bits_stay_integers() {
+    let script = "\
+const map = line => [['k', JSON.parse(line)]];
+const reduce = () => 1;
+";
+    let runtime = load(script).await.unwrap();
+    let values = |lines: &[&str]| lines.iter().map(|line| line.to_string()).collect::<Vec<_>>();
+    let pairs = runtime
+        .map_batch(values(&["1099511627776", "-4294967296", "9007199254740992", "1.5", "1e21"]))
+        .await
+        .unwrap();
+    let converted: Vec<Value> = pairs.into_iter().map(|pair| pair.value).collect();
+    assert_eq!(
+        converted,
+        vec![
+            Value::Int(1_099_511_627_776),
+            Value::Int(-4_294_967_296),
+            Value::Int(9_007_199_254_740_992),
+            Value::Float(1.5),
+            Value::Float(1e21),
+        ]
+    );
+}
