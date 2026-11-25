@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use llrt_core::vm::Vm;
 use rquickjs::{CatchResultExt, Coerced};
 use rquickjs::{Function, async_with, prelude::Promise};
@@ -9,7 +9,7 @@ use std::fmt;
 use std::thread::{self, JoinHandle};
 use flume::Receiver;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, instrument};
+use tracing::instrument;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -184,8 +184,11 @@ pub enum JobRequest {
         concurrency: usize,
         done_tx: oneshot::Sender<Result<()>>,
     },
-    Reduce(Vec<(String, Vec<Value>)>, oneshot::Sender<JobResult>),
-    Sort(Vec<KeyValue>, oneshot::Sender<JobResult>),
+    Reduce(
+        Vec<(String, Vec<Value>)>,
+        oneshot::Sender<Result<Vec<KeyValue>>>,
+    ),
+    Sort(Vec<KeyValue>, oneshot::Sender<Result<Vec<KeyValue>>>),
 }
 
 impl fmt::Debug for JobRequest {
@@ -207,11 +210,11 @@ impl fmt::Debug for JobRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum JobResult {
-    ReduceSuccess(Vec<KeyValue>),
-    SortSuccess(Vec<KeyValue>),
-    Error(String),
+/// Reports a startup failure to the waiting caller and returns it.
+fn fail_startup(init_tx: oneshot::Sender<Result<()>>, error: Error) -> Result<()> {
+    let message = error.to_string();
+    let _ = init_tx.send(Err(error));
+    Err(Error::Worker(message))
 }
 
 #[instrument(level = "trace")]
@@ -221,16 +224,29 @@ pub fn start_vm_worker(
     init_tx: oneshot::Sender<Result<()>>,
 ) -> Result<JoinHandle<Result<()>>> {
     let handle = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("Failed to create Tokio runtime")?;
+        {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                return fail_startup(
+                    init_tx,
+                    Error::Worker(format!("Failed to create Tokio runtime: {}", e)),
+                );
+            }
+        };
 
         runtime.block_on(async move {
-            let vm = Vm::new()
-                .await
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
-                .context("Failed to create VM")?;
+            let vm = match Vm::new().await {
+                Ok(vm) => vm,
+                Err(e) => {
+                    return fail_startup(
+                        init_tx,
+                        Error::Worker(format!("Failed to create VM: {}", e)),
+                    );
+                }
+            };
 
             let eval_result = vm
                 .ctx
@@ -244,9 +260,14 @@ pub fn start_vm_worker(
                                 while (true) {
                                     const item = await nextMapItem();
                                     if (item == null) return;
-                                    let pairs = await map(item);
-                                    if (typeof combine === 'function') {
-                                        pairs = await combine(pairs);
+                                    let pairs;
+                                    try {
+                                        pairs = await map(item);
+                                        if (typeof combine === 'function') {
+                                            pairs = await combine(pairs);
+                                        }
+                                    } catch (error) {
+                                        throw new Error(`map failed on input line ${JSON.stringify(item.slice(0, 200))}: ${error}`);
                                     }
                                     await sendMapResults(pairs);
                                 }
@@ -261,8 +282,12 @@ pub fn start_vm_worker(
 
                             const results = await Promise.all(
                                 batch.map(async ([key, values]) => {
-                                    const reduced = await reduce(key, values);
-                                    return [key, reduced];
+                                    try {
+                                        const reduced = await reduce(key, values);
+                                        return [key, reduced];
+                                    } catch (error) {
+                                        throw new Error(`reduce failed for key ${JSON.stringify(key)}: ${error}`);
+                                    }
                                 })
                             );
 
@@ -276,9 +301,7 @@ pub fn start_vm_worker(
                 })
                 .await;
             if let Err(e) = eval_result {
-                error!("Error loading JS code: {}", e);
-                let _ = init_tx.send(Err(anyhow::anyhow!("Error loading JS code: {}", e)));
-                return Err(anyhow::anyhow!("Error loading JS code: {}", e));
+                return fail_startup(init_tx, Error::ScriptLoad(e));
             }
 
             let _ = init_tx.send(Ok(()));
@@ -342,7 +365,7 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
             })
             .await;
 
-            let _ = done_tx.send(result.map_err(|e: String| anyhow::anyhow!(e)));
+            let _ = done_tx.send(result.map_err(|e: String| Error::Map(e)));
         }
         JobRequest::Reduce(batch, respond_to) => {
             let result = async_with!(vm.ctx => |ctx| {
@@ -367,10 +390,7 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
             })
             .await;
 
-            let _ = match result {
-                Ok(output) => respond_to.send(JobResult::ReduceSuccess(output)),
-                Err(e) => respond_to.send(JobResult::Error(e)),
-            };
+            let _ = respond_to.send(result.map_err(|e: String| Error::Reduce(e)));
         }
         JobRequest::Sort(results, respond_to) => {
             let result = async_with!(vm.ctx => |ctx| {
@@ -391,10 +411,7 @@ async fn handle_job(vm: &Vm, job: JobRequest) {
             })
             .await;
 
-            let _ = match result {
-                Ok(output) => respond_to.send(JobResult::SortSuccess(output)),
-                Err(e) => respond_to.send(JobResult::Error(e)),
-            };
+            let _ = respond_to.send(result.map_err(|e: String| Error::Sort(e)));
         }
     }
 }
@@ -405,19 +422,18 @@ pub fn run_test_file(code: String) -> Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .context("Failed to create Tokio runtime")?;
+            .map_err(|e| Error::Worker(format!("Failed to create Tokio runtime: {}", e)))?;
 
         runtime.block_on(async move {
             let vm = Vm::new()
                 .await
-                .map_err(|e| anyhow::anyhow!(e.to_string()))
-                .context("Failed to create VM")?;
+                .map_err(|e| Error::Worker(format!("Failed to create VM: {}", e)))?;
 
             vm.ctx
                 .with(|ctx| {
                     ctx.eval::<(), _>(code)
                         .catch(&ctx)
-                        .map_err(|e| anyhow::anyhow!("JS eval error: {}", e))
+                        .map_err(|e| Error::ScriptLoad(e.to_string()))
                 })
                 .await?;
 
@@ -425,20 +441,20 @@ pub fn run_test_file(code: String) -> Result<()> {
                 let test_fn = ctx.globals()
                     .get::<_, Function>("test")
                     .or_else(|_| ctx.eval("test"))
-                    .context("test function not found")?;
+                    .map_err(|e| Error::Test(format!("test function not found: {}", e)))?;
 
                 let promise: Promise = test_fn
                     .call(())
                     .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("Failed to call test function: {}", e))?;
+                    .map_err(|e| Error::Test(format!("Failed to call test function: {}", e)))?;
 
                 let () = promise
                     .into_future()
                     .await
                     .catch(&ctx)
-                    .map_err(|e| anyhow::anyhow!("JavaScript error: {}", e))?;
+                    .map_err(|e| Error::Test(format!("JavaScript error: {}", e)))?;
 
-                Ok(())
+                Ok::<(), Error>(())
             })
             .await;
 
@@ -451,5 +467,5 @@ pub fn run_test_file(code: String) -> Result<()> {
     // Wait for the thread and propagate errors
     handle
         .join()
-        .map_err(|e| anyhow::anyhow!("Thread panicked: {:?}", e))?
+        .map_err(|e| Error::Worker(format!("Thread panicked: {:?}", e)))?
 }

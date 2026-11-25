@@ -1,7 +1,7 @@
-use anyhow::Result;
 use tokio::io::BufReader;
 
 use crate::config::InputSource;
+use crate::error::{Error, Result};
 
 pub type InputReader = BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>;
 
@@ -15,7 +15,10 @@ pub async fn open(source: &InputSource) -> Result<InputReader> {
         InputSource::File(path) => {
             let file = tokio::fs::File::open(path)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path, e))?;
+                .map_err(|source| Error::OpenInput {
+                    path: path.clone(),
+                    source,
+                })?;
             Ok(BufReader::new(Box::new(file)))
         }
     }

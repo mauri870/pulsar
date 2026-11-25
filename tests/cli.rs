@@ -40,7 +40,11 @@ impl Sandbox {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        // The process may stop reading early (for example after an error), so
+        // a broken pipe here is not a test failure; the exit status is checked.
+        if let Err(error) = child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
 
         let deadline = Instant::now() + RUN_TIMEOUT;
         while child.try_wait().unwrap().is_none() {
@@ -243,35 +247,37 @@ fn unknown_flag_is_a_usage_error() {
 }
 
 #[test]
-fn syntax_error_exits_zero_with_no_output() {
+fn syntax_error_fails_with_the_parse_message() {
     let sandbox = Sandbox::new("syntax-error");
     let script = sandbox.write("broken.js", "const map =\nvar reduce = (k, v) => v[0];\n");
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "x\n");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(stderr_text(&output).contains("Error loading JS code"));
 }
 
 #[test]
-fn missing_map_function_exits_zero_with_no_output() {
+fn missing_map_function_fails() {
     let sandbox = Sandbox::new("missing-map");
     let script = sandbox.write("nomap.js", "const reduce = async (k, v) => v[0];\n");
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "x\n");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    assert!(stderr_text(&output).contains("map function is not defined"));
 }
 
 #[test]
-fn missing_reduce_function_exits_zero_with_no_output() {
+fn missing_reduce_function_fails() {
     let sandbox = Sandbox::new("missing-reduce");
     let script = sandbox.write("noreduce.js", "const map = async line => [[line, 1]];\n");
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "x\n");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    assert!(stderr_text(&output).contains("Reduce function is not defined"));
 }
 
 #[test]
-fn throwing_reduce_drops_the_failed_batch_and_exits_zero() {
+fn throwing_reduce_fails_and_names_the_key() {
     let sandbox = Sandbox::new("reduce-throws");
     let script = sandbox.write(
         "throws.js",
@@ -281,13 +287,15 @@ const reduce = async (key, values) => { throw new Error('boom'); };
 ",
     );
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "a\nb\n");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(stderr_text(&output).contains("boom"));
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("reduce failed for key"), "{}", stderr);
+    assert!(stderr.contains("boom"), "{}", stderr);
 }
 
 #[test]
-fn throwing_map_exits_zero() {
+fn throwing_map_fails_and_names_the_input_line() {
     let sandbox = Sandbox::new("map-throws");
     let script = sandbox.write(
         "throws.js",
@@ -297,17 +305,54 @@ const reduce = async (key, values) => values[0];
 ",
     );
     let output = sandbox.run(&["-s", script.to_str().unwrap()], "a\n");
-    assert_eq!(output.status.code(), Some(0));
-    assert!(stderr_text(&output).contains("map boom"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("map failed on input line \"a\""), "{}", stderr);
+    assert!(stderr.contains("map boom"), "{}", stderr);
 }
 
 #[test]
-fn sort_without_a_sort_function_prints_nothing() {
+fn sort_without_a_sort_function_fails() {
     let sandbox = Sandbox::new("sort-missing");
     let script = sandbox.write("nosort.js", PASS_THROUGH);
     let output = sandbox.run(&["-s", script.to_str().unwrap(), "--sort"], "ab\ncd\n");
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    assert!(stderr_text(&output).contains("sort function not found"));
+}
+
+#[test]
+fn a_failing_map_stops_a_large_input_early() {
+    let sandbox = Sandbox::new("map-fails-early");
+    let script = sandbox.write(
+        "fails.js",
+        "\
+const map = async line => { if (line === '50') throw new Error('stop here'); return [[line, 1]]; };
+const reduce = async (key, values) => values.length;
+",
+    );
+    let input: String = (0..200_000).map(|number| format!("{}\n", number)).collect();
+    let output = sandbox.run(&["-s", script.to_str().unwrap()], &input);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(stderr_text(&output).contains("stop here"));
+}
+
+#[test]
+fn invalid_utf8_input_fails() {
+    let sandbox = Sandbox::new("invalid-utf8");
+    let mut child = std::process::Command::new(BINARY)
+        .current_dir(&sandbox.directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"ok\n\xff\xfe\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr_text(&output).contains("Error reading input"));
 }
 
 #[test]

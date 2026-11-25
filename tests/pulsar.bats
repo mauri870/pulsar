@@ -263,7 +263,7 @@ EOF
 
   # Test with custom script file
   run "$BIN" -f "$TESTFILE" -s "$SCRIPTFILE"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
   [[ "$output" =~ "Error loading JS code: Error: unexpected token in expression: 'var'" ]]
   rm -rf "$TMPDIR"
 }

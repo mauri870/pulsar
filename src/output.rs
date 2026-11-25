@@ -3,6 +3,8 @@ use std::fmt::Display;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::instrument;
 
+use crate::error::{Error, Result};
+
 #[derive(Debug, Clone, ValueEnum, Default)]
 pub enum OutputFormat {
     #[default]
@@ -26,21 +28,26 @@ pub async fn write_result(
     result: &crate::js::Value,
     output_format: &OutputFormat,
     writer: &mut BufWriter<tokio::io::Stdout>,
-) {
+) -> Result<()> {
     match output_format {
         OutputFormat::Plain => {
-            let _ = writer
+            writer
                 .write_all(format!("{}: {}\n", key, result.to_string()).as_bytes())
-                .await;
+                .await
+                .map_err(Error::WriteOutput)?;
         }
         OutputFormat::Json => {
             let val = serde_json::Value::from(result);
-            let _ = writer
+            writer
                 .write_all(format!("{}\n", serde_json::json!({ key: val })).as_bytes())
-                .await;
+                .await
+                .map_err(Error::WriteOutput)?;
         }
     }
 
     // Use tokio's async version of flush
-    let _ = tokio::io::stdout().flush().await;
+    tokio::io::stdout()
+        .flush()
+        .await
+        .map_err(Error::WriteOutput)
 }
