@@ -111,14 +111,10 @@ fn worker_count_does_not_change_the_result() {
     }
 }
 
-/// With many workers and a chunk size of 1 or 2, a run occasionally never
-/// finishes: every VM thread ends up idle and the main task waits for map
-/// workers that never complete. It shows up in a few percent of runs when
-/// the machine is loaded, so this test starts many runs at once. It is
-/// ignored by default because it fails until that hang is fixed.
-/// Run it with `cargo test -- --ignored`.
+/// With many workers and a chunk size of 1 or 2, runs used to hang in a few
+/// percent of cases when the machine was loaded. It showed up only under
+/// load, so this test starts many runs at once.
 #[test]
-#[ignore = "known hang with small --chunk-size and many workers"]
 fn small_chunk_size_with_many_workers_terminates() {
     let sandbox = Sandbox::new("small-chunk-hang");
     std::thread::scope(|scope| {
