@@ -43,3 +43,10 @@ pub enum Error {
     #[error("{0}")]
     Worker(String),
 }
+
+impl Error {
+    /// Whether the reader of our stdout went away, as with `pulsar | head`.
+    pub fn is_broken_pipe(&self) -> bool {
+        matches!(self, Error::WriteOutput(e) if e.kind() == io::ErrorKind::BrokenPipe)
+    }
+}

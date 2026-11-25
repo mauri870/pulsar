@@ -23,6 +23,7 @@ async fn main() -> ExitCode {
     debug!("Parsed command line arguments: {:?}", cli);
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is_broken_pipe() => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {}", error);
             ExitCode::FAILURE

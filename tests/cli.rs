@@ -340,6 +340,25 @@ const reduce = async (key, values) => values.length;
 }
 
 #[test]
+fn closed_stdout_ends_quietly() {
+    let sandbox = Sandbox::new("closed-stdout");
+    let mut child = Command::new(BINARY)
+        .current_dir(&sandbox.directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The reader of stdout goes away before any output is produced.
+    drop(child.stdout.take());
+    let input: String = (0..20_000).map(|number| format!("word{}\n", number)).collect();
+    let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty(), "{}", stderr_text(&output));
+}
+
+#[test]
 fn invalid_utf8_input_fails() {
     let sandbox = Sandbox::new("invalid-utf8");
     let mut child = std::process::Command::new(BINARY)
