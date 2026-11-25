@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 use crate::output::OutputFormat;
 
@@ -36,6 +37,11 @@ pub struct Cli {
     /// Number of lines per chunk sent to each worker.
     #[arg(short = 'c', long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub(crate) chunk_size: usize,
+
+    /// Directory for temporary files when grouped data is too large for memory and spills to disk.
+    /// Defaults to the working directory.
+    #[arg(long = "tmpdir", default_value = ".")]
+    pub(crate) tmpdir: PathBuf,
 
     /// Enable CPU profiling; writes pprof.pb to the working directory on exit.
     #[arg(long = "pprof", action = clap::ArgAction::SetTrue)]

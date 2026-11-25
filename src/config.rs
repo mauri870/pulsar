@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{cli::Cli, output::OutputFormat};
 
 /// Where the input lines come from.
@@ -25,6 +27,7 @@ pub struct Config {
     pub test: bool,
     pub workers: usize,
     pub chunk_size: usize,
+    pub tmpdir: PathBuf,
     pub pprof: bool,
 }
 
@@ -45,6 +48,7 @@ impl From<Cli> for Config {
             test: cli.test,
             workers: cli.workers.unwrap_or_else(num_cpus::get_physical).max(1),
             chunk_size: cli.chunk_size.max(1),
+            tmpdir: cli.tmpdir,
             pprof: cli.pprof,
         }
     }
@@ -70,13 +74,14 @@ mod tests {
         assert!(!config.sort && !config.test && !config.pprof);
         assert!(config.workers >= 1);
         assert_eq!(config.chunk_size, 64);
+        assert_eq!(config.tmpdir, PathBuf::from("."));
     }
 
     #[test]
     fn explicit_settings() {
         let config = config(&[
             "-f", "in.txt", "-s", "script.js", "--sort", "--test", "-j", "3", "-c", "5",
-            "--output=json", "--pprof",
+            "--output=json", "--pprof", "--tmpdir", "/var/tmp",
         ]);
         assert!(matches!(&config.input, InputSource::File(path) if path == "in.txt"));
         assert!(matches!(&config.script, ScriptSource::File(path) if path == "script.js"));
@@ -84,6 +89,7 @@ mod tests {
         assert!(config.sort && config.test && config.pprof);
         assert_eq!(config.workers, 3);
         assert_eq!(config.chunk_size, 5);
+        assert_eq!(config.tmpdir, PathBuf::from("/var/tmp"));
     }
 
     #[test]

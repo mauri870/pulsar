@@ -260,6 +260,7 @@ pub struct Pulsar {
     settings: Settings,
     output_format: OutputFormat,
     test: bool,
+    tmpdir: PathBuf,
     profiler: Option<profile::Profiler>,
 }
 
@@ -280,6 +281,7 @@ impl Pulsar {
             },
             output_format: config.output_format,
             test: config.test,
+            tmpdir: config.tmpdir,
             profiler: if config.pprof {
                 Some(profile::Profiler::start())
             } else {
@@ -300,7 +302,11 @@ impl Pulsar {
             &self.settings,
             self.source,
             StdoutSink::new(self.output_format),
-            SpillStore::new(PathBuf::from("pulsar_groups"), DEFAULT_MEMORY_LIMIT_BYTES),
+            SpillStore::new(
+                self.tmpdir
+                    .join(format!("pulsar-groups-{}", std::process::id())),
+                DEFAULT_MEMORY_LIMIT_BYTES,
+            ),
         )
         .await?;
 
