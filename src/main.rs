@@ -21,6 +21,6 @@ async fn main() -> Result<()> {
 
     let cli = pulsar::Cli::parse();
     debug!("Parsed command line arguments: {:?}", cli);
-    let mr = pulsar::Pulsar::from_cli(cli).await?;
+    let mr = pulsar::Pulsar::from_config(pulsar::Config::from(cli)).await?;
     mr.run().await
 }

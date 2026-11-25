@@ -1,4 +1,10 @@
+mod cli;
+mod config;
 mod js;
+mod output;
+
+pub use cli::Cli;
+pub use config::Config;
 
 use bincode::{deserialize, serialize};
 use futures::stream::StreamExt;
@@ -13,8 +19,9 @@ use tokio_stream::wrappers::LinesStream;
 use tracing::{debug, error, info};
 
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
-use std::fmt::{Debug, Display};
+use config::{InputSource, ScriptSource};
+use output::OutputFormat;
+use std::fmt::Debug;
 use tracing::instrument;
 
 const DEFAULT_SCRIPT: &str = include_str!("../default_script.js");
@@ -28,7 +35,6 @@ fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Opti
     serialize(&values).ok()
 }
 
-const DEFAULT_CHUNK_SIZE: usize = 64;
 const MAX_GROUPING_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 
 const HASHMAP_SLOT_SIZE: usize = {
@@ -46,60 +52,6 @@ enum GroupStorage {
     Sled(sled::Db),
 }
 
-#[derive(Debug, Parser)]
-#[command(name = "pulsar")]
-#[command(about = "A simple map-reduce engine for parallel processing")]
-#[command(author, version)]
-pub struct Cli {
-    /// Input file to read input data from.
-    #[arg(short = 'f', default_value = "-")]
-    input_file: String,
-
-    /// Output format for the results.
-    #[arg(long = "output", default_value_t = OutputFormat::Plain)]
-    output_format: OutputFormat,
-
-    /// JavaScript file containing map and reduce functions. If not provided, defaults to a word count script.
-    #[arg(short = 's', long = "script")]
-    script_file: Option<String>,
-
-    /// Whether to sort the output before printing. Assumes the script has a `sort` function.
-    #[arg(long = "sort", action = clap::ArgAction::SetTrue)]
-    sort: bool,
-
-    /// Number of parallel JS VM workers. Defaults to the number of logical CPUs.
-    #[arg(short = 'j', long = "workers")]
-    workers: Option<usize>,
-
-    /// Run in test mode, executing the script against test cases.
-    #[arg(long = "test", action = clap::ArgAction::SetTrue)]
-    test: bool,
-
-    /// Number of lines per chunk sent to each worker.
-    #[arg(short = 'c', long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
-    chunk_size: usize,
-
-    /// Enable CPU profiling; writes pprof.pb to the working directory on exit.
-    #[arg(long = "pprof", action = clap::ArgAction::SetTrue)]
-    pub pprof: bool,
-}
-
-#[derive(Debug, Clone, ValueEnum, Default)]
-enum OutputFormat {
-    #[default]
-    Plain,
-    Json,
-}
-
-impl Display for OutputFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OutputFormat::Plain => write!(f, "plain"),
-            OutputFormat::Json => write!(f, "json"),
-        }
-    }
-}
-
 pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
     reader: R,
     script: String,
@@ -112,41 +64,39 @@ pub struct Pulsar<R: AsyncBufReadExt + Unpin> {
 }
 
 impl Pulsar<BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>>> {
-    /// Create a new Pulsar instance from CLI arguments
+    /// Create a new Pulsar instance from a configuration, opening the input
+    /// and reading the script.
     #[instrument(level = "trace")]
-    pub async fn from_cli(cli: Cli) -> Result<Self> {
+    pub async fn from_config(config: Config) -> Result<Self> {
         let reader: BufReader<Box<dyn tokio::io::AsyncRead + Unpin + Send>> =
-            if cli.input_file == "-" {
-                // Read from stdin
-                let stdin = tokio::io::stdin();
-                BufReader::new(Box::new(stdin))
-            } else {
-                // Read from file
-                let file = tokio::fs::File::open(&cli.input_file).await.map_err(|e| {
-                    anyhow::anyhow!("Failed to open file {}: {}", cli.input_file, e)
-                })?;
-                BufReader::new(Box::new(file))
+            match &config.input {
+                InputSource::Stdin => {
+                    let stdin = tokio::io::stdin();
+                    BufReader::new(Box::new(stdin))
+                }
+                InputSource::File(path) => {
+                    let file = tokio::fs::File::open(path)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path, e))?;
+                    BufReader::new(Box::new(file))
+                }
             };
 
-        let script = if let Some(script_file) = cli.script_file {
-            // Read custom script from file
-            tokio::fs::read_to_string(&script_file)
+        let script = match &config.script {
+            ScriptSource::File(path) => tokio::fs::read_to_string(path)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", script_file, e))?
-        } else {
-            // Use default word count script
-            DEFAULT_SCRIPT.into()
+                .map_err(|e| anyhow::anyhow!("Failed to read script file {}: {}", path, e))?,
+            ScriptSource::Default => DEFAULT_SCRIPT.into(),
         };
-        let workers = cli.workers.unwrap_or_else(num_cpus::get_physical).max(1);
         Ok(Pulsar {
             reader,
-            script: script.clone(),
-            output_format: cli.output_format,
-            sort: cli.sort,
-            test: cli.test,
-            workers,
-            chunk_size: cli.chunk_size.max(1),
-            pprof_guard: if cli.pprof {
+            script,
+            output_format: config.output_format,
+            sort: config.sort,
+            test: config.test,
+            workers: config.workers,
+            chunk_size: config.chunk_size,
+            pprof_guard: if config.pprof {
                 Some(pprof2::ProfilerGuard::new(999).unwrap())
             } else {
                 None
