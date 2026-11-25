@@ -4,6 +4,7 @@
 
 use bincode::{deserialize, serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use tracing::info;
 
@@ -58,15 +59,10 @@ impl GroupStore for MemoryStore {
     }
 }
 
-const HASHMAP_SLOT_SIZE: usize = {
-    let size = std::mem::size_of::<(String, Vec<Value>)>();
-    let align = {
-        let a = std::mem::align_of::<(String, Vec<Value>)>();
-        let b = std::mem::align_of::<usize>();
-        if a > b { a } else { b }
-    };
-    (size / align) * align
-};
+/// Memory a group takes before its first value: the map entry and the key.
+fn new_group_bytes(key: &str) -> usize {
+    std::mem::size_of::<(String, Vec<Value>)>() + key.len()
+}
 
 fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
     let mut values: Vec<Value> = old_value
@@ -82,6 +78,8 @@ fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Opti
 pub struct SpillStore {
     memory: HashMap<String, Vec<Value>>,
     database: Option<sled::Db>,
+    /// Estimated size of what `memory` holds.
+    memory_bytes: usize,
     directory: PathBuf,
     memory_limit_bytes: usize,
 }
@@ -91,6 +89,7 @@ impl SpillStore {
         SpillStore {
             memory: HashMap::new(),
             database: None,
+            memory_bytes: 0,
             directory,
             memory_limit_bytes,
         }
@@ -113,6 +112,7 @@ impl SpillStore {
         for (key, values) in std::mem::take(&mut self.memory) {
             database.merge(key.as_bytes(), serialize(&values)?)?;
         }
+        self.memory_bytes = 0;
         Ok(())
     }
 }
@@ -120,9 +120,16 @@ impl SpillStore {
 impl GroupStore for SpillStore {
     fn add(&mut self, pairs: Vec<KeyValue>) -> Result<()> {
         for pair in pairs {
-            self.memory.entry(pair.key).or_default().push(pair.value);
+            self.memory_bytes += pair.value.estimated_size();
+            match self.memory.entry(pair.key) {
+                Entry::Occupied(mut group) => group.get_mut().push(pair.value),
+                Entry::Vacant(group) => {
+                    self.memory_bytes += new_group_bytes(group.key());
+                    group.insert(vec![pair.value]);
+                }
+            }
         }
-        if HASHMAP_SLOT_SIZE * self.memory.capacity() >= self.memory_limit_bytes {
+        if self.memory_bytes >= self.memory_limit_bytes {
             self.spill()?;
         }
         Ok(())
