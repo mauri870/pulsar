@@ -7,6 +7,7 @@ mod pipeline;
 mod profile;
 mod runtime;
 mod script;
+mod store;
 mod value;
 
 pub use cli::Cli;

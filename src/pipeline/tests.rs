@@ -5,6 +5,7 @@ use super::*;
 use futures::Stream;
 use std::collections::BTreeMap;
 use std::io;
+use crate::store::{MemoryStore, SpillStore};
 use std::sync::Mutex;
 
 /// Counts words: map emits `(word, 1)`, reduce sums the values and sort
@@ -143,7 +144,7 @@ async fn counts_words_for_every_worker_and_batch_size() {
     for (workers, chunk_size) in [(1, 1), (2, 1), (4, 3), (3, 100)] {
         let (sink, written) = VecSink::new();
         let source = VecSource::lines(&["a b a", "b a", "c", ""]);
-        run_pipeline::<FakeRuntime>("", &settings(workers, chunk_size, false), source, sink)
+        run_pipeline::<FakeRuntime>("", &settings(workers, chunk_size, false), source, sink, MemoryStore::default())
             .await
             .unwrap();
         assert_eq!(counts(&written), expected, "{} workers, chunk {}", workers, chunk_size);
@@ -153,7 +154,7 @@ async fn counts_words_for_every_worker_and_batch_size() {
 #[tokio::test]
 async fn empty_input_writes_nothing() {
     let (sink, written) = VecSink::new();
-    run_pipeline::<FakeRuntime>("", &settings(2, 4, false), VecSource::lines(&[]), sink)
+    run_pipeline::<FakeRuntime>("", &settings(2, 4, false), VecSource::lines(&[]), sink, MemoryStore::default())
         .await
         .unwrap();
     assert!(written.lock().unwrap().is_empty());
@@ -163,7 +164,7 @@ async fn empty_input_writes_nothing() {
 async fn sort_orders_the_results_through_the_runtime() {
     let (sink, written) = VecSink::new();
     let source = VecSource::lines(&["b a c", "a"]);
-    run_pipeline::<FakeRuntime>("", &settings(2, 1, true), source, sink)
+    run_pipeline::<FakeRuntime>("", &settings(2, 1, true), source, sink, MemoryStore::default())
         .await
         .unwrap();
     let keys: Vec<String> = written.lock().unwrap().iter().map(|(key, _)| key.clone()).collect();
@@ -176,7 +177,7 @@ async fn a_map_failure_is_returned() {
     let mut lines = vec!["x"; 500];
     lines.insert(250, "map-error");
     let result =
-        run_pipeline::<FakeRuntime>("", &settings(4, 2, false), VecSource::lines(&lines), sink).await;
+        run_pipeline::<FakeRuntime>("", &settings(4, 2, false), VecSource::lines(&lines), sink, MemoryStore::default()).await;
     assert!(matches!(result, Err(Error::Map(_))), "{:?}", result);
 }
 
@@ -184,7 +185,7 @@ async fn a_map_failure_is_returned() {
 async fn a_reduce_failure_is_returned() {
     let (sink, _) = VecSink::new();
     let source = VecSource::lines(&["a", "reduce-error", "b"]);
-    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink).await;
+    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, MemoryStore::default()).await;
     assert!(matches!(result, Err(Error::Reduce(_))), "{:?}", result);
 }
 
@@ -195,7 +196,7 @@ async fn a_read_error_is_returned() {
         Ok("a".to_string()),
         Err(io::Error::new(io::ErrorKind::InvalidData, "bad line")),
     ]);
-    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink).await;
+    let result = run_pipeline::<FakeRuntime>("", &settings(2, 1, false), source, sink, MemoryStore::default()).await;
     assert!(matches!(result, Err(Error::ReadInput(_))), "{:?}", result);
 }
 
@@ -207,6 +208,33 @@ async fn a_sink_failure_is_returned_as_the_root_cause() {
     let mut lines: Vec<&str> = words.iter().map(String::as_str).collect();
     lines.push("b");
     let result =
-        run_pipeline::<FakeRuntime>("", &settings(3, 4, false), VecSource::lines(&lines), sink).await;
+        run_pipeline::<FakeRuntime>("", &settings(3, 4, false), VecSource::lines(&lines), sink, MemoryStore::default()).await;
     assert!(matches!(result, Err(Error::WriteOutput(_))), "{:?}", result);
+}
+
+#[tokio::test]
+async fn counts_words_when_the_group_store_spills_to_disk() {
+    let directory = crate::store::tests::unique_directory("pipeline-spill");
+    let (sink, written) = VecSink::new();
+    let source = VecSource::lines(&["a b a", "b a", "c", "d d d d"]);
+    // A limit of one byte makes the store spill after every batch.
+    run_pipeline::<FakeRuntime>(
+        "",
+        &settings(2, 1, false),
+        source,
+        sink,
+        SpillStore::new(directory.clone(), 1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        counts(&written),
+        BTreeMap::from([
+            ("a".to_string(), 3),
+            ("b".to_string(), 2),
+            ("c".to_string(), 1),
+            ("d".to_string(), 4),
+        ])
+    );
+    assert!(!directory.exists());
 }

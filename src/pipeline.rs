@@ -3,9 +3,8 @@
 //! whole pipeline is generic over the script runtime, the input source and the
 //! output sink.
 
-use bincode::{deserialize, serialize};
 use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
-use std::collections::HashMap;
+use std::path::PathBuf;
 use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
@@ -19,38 +18,13 @@ use crate::error::{Error, Result};
 use crate::input::{self, ReaderSource, Source};
 use crate::output::{OutputFormat, Sink, StdoutSink};
 use crate::runtime::{LlrtRuntime, ScriptRuntime, WorkerPool};
-use crate::script::{self, Contract};
-use crate::value::{KeyValue, Value};
 use crate::profile;
+use crate::script::{self, Contract};
+use crate::store::{DEFAULT_MEMORY_LIMIT_BYTES, GroupStore, SpillStore};
+use crate::value::{KeyValue, Value};
 
 #[cfg(test)]
 mod tests;
-
-fn merge_values(_key: &[u8], old_value: Option<&[u8]>, new_bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut values: Vec<Value> = old_value
-        .and_then(|bytes| deserialize(bytes).ok())
-        .unwrap_or_default();
-    let new_values: Vec<Value> = deserialize(new_bytes).unwrap_or_default();
-    values.extend(new_values);
-    serialize(&values).ok()
-}
-
-const MAX_GROUPING_HEAP_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
-
-const HASHMAP_SLOT_SIZE: usize = {
-    let size = std::mem::size_of::<(String, Vec<Value>)>();
-    let align = {
-        let a = std::mem::align_of::<(String, Vec<Value>)>();
-        let b = std::mem::align_of::<usize>();
-        if a > b { a } else { b }
-    };
-    (size / align) * align
-};
-
-enum GroupStorage {
-    Memory(HashMap<String, Vec<Value>>),
-    Sled(sled::Db),
-}
 
 /// The settings the stages need.
 #[derive(Debug, Clone)]
@@ -95,6 +69,7 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
     settings: &Settings,
     source: impl Source,
     sink: impl Sink,
+    store: impl GroupStore,
 ) -> Result<()> {
     info!("Starting pulsar engine with {} CPU workers", settings.workers);
     let contract = Contract {
@@ -106,7 +81,7 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
 
     let (map_results, map_receiver) = mpsc::channel(settings.workers * 2);
     let (reduce_results, reduce_receiver) = mpsc::channel(settings.chunk_size);
-    let group = Task::spawn(group_stage(map_receiver));
+    let group = Task::spawn(group_stage(map_receiver, store));
     let output = Task::spawn(output_stage(
         reduce_receiver,
         Arc::clone(&pool),
@@ -118,17 +93,11 @@ pub(crate) async fn run_pipeline<R: ScriptRuntime + 'static>(
     map_stage(source, &pool, settings, map_results).await?;
 
     info!("Map phase completed, starting group phase");
-    let groups = group.join().await?;
-    info!(
-        "Group phase completed, {} total keys",
-        match &groups {
-            GroupStorage::Memory(m) => m.len(),
-            GroupStorage::Sled(db) => db.len(),
-        }
-    );
+    let store = group.join().await?;
+    info!("Group phase completed, {} total keys", store.key_count());
 
     info!("Starting reduce phase");
-    if let Err(reduce_error) = reduce_stage(groups, &pool, settings, reduce_results).await {
+    if let Err(reduce_error) = reduce_stage(store, &pool, settings, reduce_results).await {
         // A failed writer is the root cause of a failed send, so report it first.
         if output.is_finished() {
             output.join().await?;
@@ -189,84 +158,34 @@ async fn map_stage(
     Ok(())
 }
 
-/// Groups the mapped pairs by key, spilling to disk when memory use gets too
-/// high. Returns when the map stage drops its sender.
-async fn group_stage(mut pairs: mpsc::Receiver<Vec<KeyValue>>) -> Result<GroupStorage> {
-    let mut overflow_db: Option<sled::Db> = None;
-    let mut hashmap: HashMap<String, Vec<Value>> = HashMap::new();
+/// Groups the mapped pairs by key in the store. Returns the store when the
+/// map stage drops its sender.
+async fn group_stage<S: GroupStore>(
+    mut pairs: mpsc::Receiver<Vec<KeyValue>>,
+    mut store: S,
+) -> Result<S> {
     let mut total_processed = 0;
-
     while let Some(kvs) = pairs.recv().await {
         total_processed += kvs.len();
-        for kv in kvs {
-            hashmap.entry(kv.key).or_insert_with(Vec::new).push(kv.value);
-        }
-
-        // check if we need to spill to disk
-        if HASHMAP_SLOT_SIZE * hashmap.capacity() >= MAX_GROUPING_HEAP_BYTES {
-            info!(
-                "Flushing {} entries to DB, total processed: {}",
-                hashmap.len(),
-                total_processed
-            );
-            let db = match overflow_db {
-                Some(ref db) => db,
-                None => {
-                    let db = sled::Config::default()
-                        .path("pulsar_groups")
-                        .temporary(true)
-                        .open()?;
-                    db.set_merge_operator(merge_values);
-                    overflow_db = Some(db);
-                    overflow_db.as_ref().unwrap()
-                }
-            };
-            for (key, values) in hashmap.drain() {
-                let values_bytes = serialize(&values)?;
-                db.merge(key.as_bytes(), values_bytes)?;
-            }
-        }
+        store.add(kvs)?;
     }
-
+    store.finish()?;
     info!(
         "Group phase completed, total key-value pairs processed: {}",
         total_processed
     );
-
-    if let Some(db) = overflow_db {
-        if !hashmap.is_empty() {
-            info!("Final flush of {} remaining entries to DB", hashmap.len());
-            for (key, values) in hashmap.drain() {
-                let values_bytes = serialize(&values)?;
-                db.merge(key.as_bytes(), values_bytes)?;
-            }
-        }
-        Ok(GroupStorage::Sled(db))
-    } else {
-        Ok(GroupStorage::Memory(hashmap))
-    }
+    Ok(store)
 }
 
 /// Reduces every group in batches, several batches at a time, and forwards
 /// the reduced pairs. Returns at the first failure.
 async fn reduce_stage(
-    groups: GroupStorage,
+    store: impl GroupStore,
     pool: &Arc<WorkerPool>,
     settings: &Settings,
     results: mpsc::Sender<KeyValue>,
 ) -> Result<()> {
-    let entries: Vec<(String, Vec<Value>)> = match groups {
-        GroupStorage::Memory(hashmap) => hashmap.into_iter().collect(),
-        GroupStorage::Sled(db) => db
-            .iter()
-            .map(|entry| -> Result<(String, Vec<Value>)> {
-                let (key, value_bytes) = entry?;
-                let key = String::from_utf8_lossy(&key).to_string();
-                let values: Vec<Value> = deserialize(&value_bytes)?;
-                Ok((key, values))
-            })
-            .collect::<Result<_>>()?,
-    };
+    let entries = store.into_groups()?;
 
     let task_index = AtomicUsize::new(0);
     tokio_stream::iter(entries)
@@ -381,6 +300,7 @@ impl Pulsar {
             &self.settings,
             self.source,
             StdoutSink::new(self.output_format),
+            SpillStore::new(PathBuf::from("pulsar_groups"), DEFAULT_MEMORY_LIMIT_BYTES),
         )
         .await?;
 
